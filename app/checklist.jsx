@@ -82,6 +82,48 @@ const SECTIONS = [
       { id: "quarantine",    label: "Quarantine policy reviewed — no unreviewed releases", severity: "medium",   note: "Check that admins are reviewing quarantine regularly" },
     ],
   },
+  {
+    id: "sharing",
+    label: "Data Sharing + Collaboration",
+    severity: "high",
+    icon: "🔗",
+    desc: "Small businesses leak more data through sharing than hacking.",
+    checks: [
+      { id: "anon_links",    label: "Anonymous sharing links disabled or restricted",       severity: "high",     note: "SharePoint admin → Sharing → 'Anyone' links should be disabled" },
+      { id: "ext_sharing",   label: "External sharing restricted to specific domains",      severity: "high",     note: "Default allows sharing with anyone — should be scoped to known partners" },
+      { id: "guest_users",   label: "Guest users reviewed — only active, known accounts",  severity: "high",     note: "Entra ID → External Identities → list and review all guest accounts" },
+      { id: "stale_guests",  label: "No stale guest accounts (inactive 90+ days)",         severity: "medium",   note: "Former contractors and vendor contacts often left with active access" },
+      { id: "sensitive_sites", label: "Sensitive SharePoint sites have restricted access", severity: "medium",   note: "HR, finance, and executive sites should have explicit access controls" },
+      { id: "onedrive_sharing", label: "OneDrive default sharing set to internal only",    severity: "medium",   note: "Admin center → SharePoint → Settings → Default sharing scope" },
+    ],
+  },
+  {
+    id: "endpoint",
+    label: "Endpoint Security",
+    severity: "high",
+    icon: "💻",
+    desc: "Devices are the front door. Requires Business Premium or Intune licensing.",
+    checks: [
+      { id: "intune_enrolled", label: "Devices enrolled in Microsoft Intune",              severity: "high",     note: "N/A if Business Basic/Standard — requires Business Premium or Intune add-on" },
+      { id: "compliance_policy", label: "Device compliance policies configured",           severity: "high",     note: "Intune → Device compliance → Policies — should require encryption + PIN" },
+      { id: "defender_active", label: "Microsoft Defender antivirus active on all devices", severity: "critical", note: "Check Intune or Defender portal for devices with protection disabled" },
+      { id: "bitlocker",     label: "BitLocker (disk encryption) enabled on Windows devices", severity: "high",  note: "Required for compliance — lost laptops with unencrypted drives are reportable incidents" },
+      { id: "local_admin",   label: "Local administrator rights reviewed and restricted",  severity: "medium",   note: "Users should not have local admin rights on managed devices" },
+    ],
+  },
+  {
+    id: "continuity",
+    label: "Backup + Recovery",
+    severity: "high",
+    icon: "🔄",
+    desc: "Microsoft does not back up your data. This surprises almost every SMB client.",
+    checks: [
+      { id: "m365_backup",   label: "Third-party M365 backup solution in place",           severity: "critical", note: "Microsoft's retention ≠ backup. Deleted data is gone after retention window." },
+      { id: "breakglass",    label: "Break-glass emergency admin account exists",          severity: "high",     note: "Cloud-only account not tied to any person — locked in a vault for emergencies" },
+      { id: "security_contact", label: "Security alert contacts configured in M365",       severity: "medium",   note: "Admin center → Settings → Org settings → Security contact — should be current" },
+      { id: "ir_contact",    label: "Incident response contact documented",                severity: "medium",   note: "Who do they call if something goes wrong at 2am? Should be documented somewhere." },
+    ],
+  },
 ]
 
 const SEVERITY_META = {
@@ -120,6 +162,32 @@ function calcScore(checks) {
     if (r === "fail") fail++
   }))
   return { pass, fail, total: pass + fail }
+}
+
+// Letter grade — weighted: critical failures penalize more than medium
+function calcGrade(checks) {
+  let weightedPass = 0, weightedTotal = 0
+  const weights = { critical: 3, high: 2, medium: 1 }
+  SECTIONS.forEach(s => s.checks.forEach(c => {
+    const r = checks?.[c.id]?.result
+    const w = weights[c.severity] || 1
+    if (r === "pass" || r === "fail") {
+      weightedTotal += w
+      if (r === "pass") weightedPass += w
+    }
+  }))
+  if (weightedTotal === 0) return null
+  const pct = (weightedPass / weightedTotal) * 100
+  if (pct >= 93) return { grade: "A",  plus: false, color: "#15803d", bg: "#f0fdf4", border: "#86efac" }
+  if (pct >= 90) return { grade: "A",  plus: false, minus: true, color: "#15803d", bg: "#f0fdf4", border: "#86efac" }
+  if (pct >= 87) return { grade: "B",  plus: true,  color: "#1d4ed8", bg: "#eff6ff", border: "#93c5fd" }
+  if (pct >= 83) return { grade: "B",  plus: false, color: "#1d4ed8", bg: "#eff6ff", border: "#93c5fd" }
+  if (pct >= 80) return { grade: "B",  plus: false, minus: true, color: "#1d4ed8", bg: "#eff6ff", border: "#93c5fd" }
+  if (pct >= 77) return { grade: "C",  plus: true,  color: "#d97706", bg: "#fffbeb", border: "#fcd34d" }
+  if (pct >= 73) return { grade: "C",  plus: false, color: "#d97706", bg: "#fffbeb", border: "#fcd34d" }
+  if (pct >= 70) return { grade: "C",  plus: false, minus: true, color: "#d97706", bg: "#fffbeb", border: "#fcd34d" }
+  if (pct >= 60) return { grade: "D",  plus: false, color: "#ea580c", bg: "#fff7ed", border: "#fdba74" }
+  return           { grade: "F",  plus: false, color: "#dc2626", bg: "#fef2f2", border: "#fca5a5" }
 }
 
 // ── EXPORT BUILDER (kept for reference / future use) ───────────────────────
@@ -483,6 +551,12 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
             <div className="text-center"><p className="text-[18px] font-semibold text-green-400">{pass}</p><p className="text-[10px] font-mono text-[#3d5a7a] uppercase">Pass</p></div>
             <div className="text-center"><p className="text-[18px] font-semibold text-red-400">{fail}</p><p className="text-[10px] font-mono text-[#3d5a7a] uppercase">Fail</p></div>
             <div className="text-center"><p className="text-[18px] font-semibold text-[#60a5fa]">{pct}%</p><p className="text-[10px] font-mono text-[#3d5a7a] uppercase">{doneChecks}/{totalChecks}</p></div>
+            {(() => { const g = calcGrade(engagement.checks); return g ? (
+              <div className="text-center px-3 py-1 rounded-lg border" style={{ background: g.bg, borderColor: g.border }}>
+                <p className="text-[20px] font-bold leading-tight" style={{ color: g.color }}>{g.grade}{g.plus ? "+" : g.minus ? "−" : ""}</p>
+                <p className="text-[10px] font-mono text-[#3d5a7a] uppercase">Grade</p>
+              </div>
+            ) : null })()}
           </div>
         </div>
         <div className="mt-3 h-1.5 bg-[#1a2d45] rounded-full overflow-hidden">
@@ -607,6 +681,9 @@ function ExportModal({ engagement, onClose }) {
   const { pass, fail } = calcScore(engagement.checks)
   const total = pass + fail
   const pct = total ? Math.round((pass / total) * 100) : 0
+  const grade = calcGrade(engagement.checks)
+  const gradeSuffix = grade ? (grade.plus ? "+" : grade.minus ? "−" : "") : ""
+  const gradeLabel = grade ? `${grade.grade}${gradeSuffix}` : null
 
   async function generateReport() {
     setStage("generating")
@@ -630,6 +707,7 @@ CLIENT: ${engagement.company}${engagement.clientName ? ` (${engagement.clientNam
 PACKAGE: ${engagement.package || "Business Snapshot"}
 REVIEW DATE: ${formatDate(engagement.createdAt)}
 SCORE: ${pass} pass / ${fail} fail out of ${total} checks (${pct}%)
+SECURITY GRADE: ${gradeLabel || "Not calculated"}
 ${engagement.licenseType ? `LICENSE: ${engagement.licenseType}` : ""}
 ${engagement.userCount ? `USERS: ${engagement.userCount}` : ""}
 ${engagement.secureScoreNotes ? `SECURE SCORE NOTES: ${engagement.secureScoreNotes}` : ""}
@@ -761,6 +839,12 @@ Rules:
                 <div className="text-center"><p className="text-[18px] font-semibold text-green-400">{pass}</p><p className="text-[10px] font-mono text-[#3d5a7a]">PASS</p></div>
                 <div className="text-center"><p className="text-[18px] font-semibold text-red-400">{fail}</p><p className="text-[10px] font-mono text-[#3d5a7a]">FAIL</p></div>
                 <div className="text-center"><p className="text-[18px] font-semibold text-[#60a5fa]">{pct}%</p><p className="text-[10px] font-mono text-[#3d5a7a]">SCORE</p></div>
+                {gradeLabel && grade && (
+                  <div className="text-center px-3 py-1 rounded-lg border" style={{ background: grade.bg, borderColor: grade.border }}>
+                    <p className="text-[18px] font-bold leading-tight" style={{ color: grade.color }}>{gradeLabel}</p>
+                    <p className="text-[10px] font-mono text-[#3d5a7a]">GRADE</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -855,14 +939,28 @@ Rules:
                 </div>
 
                 {/* Score row */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 22 }}>
-                  {[["PASSING", pass, "#15803d"], ["NEEDS ATTENTION", fail, "#b91c1c"], ["OVERALL SCORE", `${pct}%`, "#1d4ed8"]].map(([lbl, val, col]) => (
-                    <div key={lbl} style={{ background: "#f9fafb", borderRadius: 8, padding: "12px 14px", textAlign: "center", border: "1px solid #f3f4f6" }}>
-                      <div style={{ fontSize: 26, fontWeight: 600, color: col, lineHeight: 1 }}>{val}</div>
-                      <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 4, fontFamily: "monospace", textTransform: "uppercase", letterSpacing: "0.06em" }}>{lbl}</div>
+                {(() => {
+                  const grade = calcGrade(engagement.checks)
+                  const gradeSuffix = grade ? (grade.plus ? "+" : grade.minus ? "−" : "") : ""
+                  const gradeLabel = grade ? `${grade.grade}${gradeSuffix}` : "—"
+                  const gradeColor = grade?.color || "#6b7280"
+                  const gradeBg = grade?.bg || "#f9fafb"
+                  const gradeBorder = grade?.border || "#e5e7eb"
+                  return (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 22 }}>
+                      {[["PASSING", pass, "#15803d"], ["NEEDS ATTENTION", fail, "#b91c1c"], ["OVERALL SCORE", `${pct}%`, "#1d4ed8"]].map(([lbl, val, col]) => (
+                        <div key={lbl} style={{ background: "#f9fafb", borderRadius: 8, padding: "12px 14px", textAlign: "center", border: "1px solid #f3f4f6" }}>
+                          <div style={{ fontSize: 26, fontWeight: 600, color: col, lineHeight: 1 }}>{val}</div>
+                          <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 4, fontFamily: "monospace", textTransform: "uppercase", letterSpacing: "0.06em" }}>{lbl}</div>
+                        </div>
+                      ))}
+                      <div style={{ background: gradeBg, borderRadius: 8, padding: "12px 14px", textAlign: "center", border: `1px solid ${gradeBorder}` }}>
+                        <div style={{ fontSize: 26, fontWeight: 700, color: gradeColor, lineHeight: 1 }}>{gradeLabel}</div>
+                        <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 4, fontFamily: "monospace", textTransform: "uppercase", letterSpacing: "0.06em" }}>SECURITY GRADE</div>
+                      </div>
                     </div>
-                  ))}
-                </div>
+                  )
+                })()}
 
                 {/* Executive summary */}
                 <div style={{ background: "#fef9f2", borderLeft: "3px solid #d97706", borderRadius: "0 8px 8px 0", padding: "12px 16px", marginBottom: 22 }}>
