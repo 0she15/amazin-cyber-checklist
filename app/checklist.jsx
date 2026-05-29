@@ -666,13 +666,17 @@ Rules: findings = only FAILED checks, sorted Critical → High → Medium. passI
         })
       })
       const data = await res.json()
+      if (!res.ok) {
+        const msg = data?.error || `Error ${res.status}`
+        throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg))
+      }
       const text = (data.content || []).map(b => b.text || "").join("")
       const clean = text.replace(/```json|```/g, "").trim()
       const parsed = JSON.parse(clean)
       setReport(parsed)
       setStage("done")
     } catch (e) {
-      setErrorMsg("Something went wrong generating the report. Try again.")
+      setErrorMsg(e.message || "Something went wrong. Try again.")
       setStage("error")
       console.error(e)
     }
