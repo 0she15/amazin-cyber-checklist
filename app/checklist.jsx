@@ -122,7 +122,7 @@ function calcScore(checks) {
   return { pass, fail, total: pass + fail }
 }
 
-// ── EXPORT BUILDER ─────────────────────────────────────────────────────────
+// ── EXPORT BUILDER (kept for reference / future use) ───────────────────────
 function buildExport(engagement) {
   const lines = []
   lines.push(`AMAZIN CYBER — M365 SECURITY SNAPSHOT`)
@@ -149,18 +149,6 @@ function buildExport(engagement) {
     lines.push(``)
   })
 
-  lines.push(`── CLAUDE REPORT PROMPT ──`)
-  lines.push(`Use the findings above to generate a plain-English Microsoft 365 Security Snapshot report for ${engagement.company || "this client"}.`)
-  lines.push(``)
-  lines.push(`Instructions:`)
-  lines.push(`- Write an Executive Summary of 2-3 sentences a business owner can understand`)
-  lines.push(`- Summarize findings by section (MFA, Admin Roles, Email Security, Conditional Access, Mailbox Rules)`)
-  lines.push(`- List Critical findings first, then High, then Medium`)
-  lines.push(`- For each finding, explain what it means in plain English and why it matters to the business`)
-  lines.push(`- End with a "What's Working Well" section for all Pass items`)
-  lines.push(`- Tone: calm, clear, no jargon. Write for a business owner, not an IT team.`)
-  lines.push(`- Do not use acronyms without explaining them on first use`)
-
   return lines.join("\n")
 }
 
@@ -170,7 +158,6 @@ export default function Checklist() {
   const [view, setView] = useState("list") // list | active | new
   const [activeId, setActiveId] = useState(null)
   const [showExport, setShowExport] = useState(false)
-  const [exportCopied, setExportCopied] = useState(false)
   const [timerRunning, setTimerRunning] = useState(false)
   const [newForm, setNewForm] = useState({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", notes: "" })
   const timerRef = useRef(null)
@@ -288,7 +275,7 @@ export default function Checklist() {
               <>
                 <button onClick={() => { setShowExport(true); setTimerRunning(false) }}
                   className="text-[13px] font-mono text-white bg-green-600 px-4 py-2 rounded-lg hover:bg-green-700 transition-colors">
-                  Export Findings
+                  Generate Report
                 </button>
                 <button onClick={() => { setView("list"); setTimerRunning(false) }}
                   className="text-[13px] font-mono text-[#7a9abf] border border-[#1a2d45] px-4 py-2 rounded-lg hover:text-[#e8f0fe] hover:border-[#1e3a5f] transition-colors">
@@ -340,16 +327,11 @@ export default function Checklist() {
         )}
       </div>
 
-      {/* ── EXPORT MODAL ── */}
+      {/* ── REPORT MODAL ── */}
       {showExport && active && (
         <ExportModal
           engagement={active}
-          onClose={() => { setShowExport(false); setExportCopied(false) }}
-          copied={exportCopied}
-          onCopy={() => {
-            navigator.clipboard.writeText(buildExport(active))
-            setExportCopied(true)
-          }}
+          onClose={() => setShowExport(false)}
         />
       )}
     </div>
@@ -616,51 +598,284 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
   )
 }
 
-// ── EXPORT MODAL ───────────────────────────────────────────────────────────
-function ExportModal({ engagement, onClose, copied, onCopy }) {
-  const text = buildExport(engagement)
+// ── REPORT MODAL ───────────────────────────────────────────────────────────
+function ExportModal({ engagement, onClose }) {
+  const [stage, setStage] = useState("ready") // ready | generating | done | error
+  const [report, setReport] = useState(null)
+  const [errorMsg, setErrorMsg] = useState("")
+
+  const { pass, fail } = calcScore(engagement.checks)
+  const total = pass + fail
+  const pct = total ? Math.round((pass / total) * 100) : 0
+
+  async function generateReport() {
+    setStage("generating")
+    setErrorMsg("")
+
+    const failLines = []
+    const passLines = []
+    SECTIONS.forEach(section => {
+      section.checks.forEach(check => {
+        const r = engagement.checks?.[check.id]
+        const sev = SEVERITY_META[check.severity]?.label || check.severity
+        const notes = r?.notes ? ` (Notes: ${r.notes})` : ""
+        if (r?.result === "fail") failLines.push(`[${sev}] ${check.label}${notes}`)
+        if (r?.result === "pass") passLines.push(`[${sev}] ${check.label}`)
+      })
+    })
+
+    const prompt = `You are writing a Microsoft 365 Security Snapshot report for a small business owner. The audience is non-technical.
+
+CLIENT: ${engagement.company}${engagement.clientName ? ` (${engagement.clientName})` : ""}
+PACKAGE: ${engagement.package || "Business Snapshot"}
+REVIEW DATE: ${formatDate(engagement.createdAt)}
+SCORE: ${pass} pass / ${fail} fail out of ${total} checks (${pct}%)
+${engagement.licenseType ? `LICENSE: ${engagement.licenseType}` : ""}
+${engagement.userCount ? `USERS: ${engagement.userCount}` : ""}
+${engagement.secureScoreNotes ? `SECURE SCORE NOTES: ${engagement.secureScoreNotes}` : ""}
+
+FAILED CHECKS (needs attention):
+${failLines.join("\n") || "None"}
+
+PASSING CHECKS (working well):
+${passLines.join("\n") || "None"}
+
+Respond with ONLY a valid JSON object (no markdown, no backticks):
+{
+  "executiveSummary": "2-3 sentences. Lead with what is working. Name the most critical risks plainly. End with the priority action. Define any technical term on first use.",
+  "findings": [
+    {
+      "severity": "Critical|High|Medium",
+      "title": "Short plain-English title — rewrite the checklist item, do not copy it verbatim",
+      "explanation": "2-3 sentences. What this setting is, what could go wrong if it is not fixed, and why it matters to this specific business. No jargon. If a technical term is unavoidable, define it in parentheses."
+    }
+  ],
+  "passItems": ["Short plain-English phrase describing what is working — rewrite, do not copy verbatim"]
+}
+
+Rules: findings = only FAILED checks, sorted Critical → High → Medium. passItems = only PASSING checks. Tone: calm, honest, reassuring. Never alarming or dismissive.`
+
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          messages: [{ role: "user", content: prompt }]
+        })
+      })
+      const data = await res.json()
+      const text = (data.content || []).map(b => b.text || "").join("")
+      const clean = text.replace(/```json|```/g, "").trim()
+      const parsed = JSON.parse(clean)
+      setReport(parsed)
+      setStage("done")
+    } catch (e) {
+      setErrorMsg("Something went wrong generating the report. Try again.")
+      setStage("error")
+      console.error(e)
+    }
+  }
+
+  function printReport() {
+    const el = document.getElementById("ac-report-print-target")
+    if (!el) return
+    const w = window.open("", "_blank")
+    w.document.write(`<!DOCTYPE html><html><head><title>M365 Security Snapshot — ${engagement.company}</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:'DM Sans',sans-serif;font-size:14px;color:#111;background:#fff;padding:40px;max-width:760px;margin:0 auto}
+      .r-masthead{border-bottom:1.5px solid #e5e7eb;padding-bottom:20px;margin-bottom:24px}
+      .r-brandline{font-family:'DM Mono',monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#6b7280;margin-bottom:6px}
+      .r-title{font-family:'DM Serif Display',serif;font-size:26px;color:#111;line-height:1.1;margin-bottom:4px}
+      .r-meta{font-size:12px;color:#6b7280;display:flex;gap:20px;flex-wrap:wrap;margin-top:8px}
+      .r-meta span strong{color:#374151}
+      .r-scores{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px}
+      .r-score{background:#f9fafb;border-radius:8px;padding:12px;text-align:center;border:1px solid #f3f4f6}
+      .r-score .n{font-family:'DM Serif Display',serif;font-size:28px;line-height:1}
+      .r-score .l{font-size:11px;color:#9ca3af;margin-top:4px;font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:.06em}
+      .n.pass{color:#15803d}.n.fail{color:#b91c1c}.n.score{color:#1d4ed8}
+      .r-exec{background:#fef9f2;border-left:3px solid #d97706;border-radius:0 8px 8px 0;padding:14px 18px;margin-bottom:24px;font-size:14px;color:#374151;line-height:1.7}
+      .r-exec-lbl{font-family:'DM Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#d97706;margin-bottom:8px}
+      .r-section{margin-bottom:20px}
+      .r-section-title{font-family:'DM Serif Display',serif;font-size:16px;color:#111;border-bottom:1px solid #e5e7eb;padding-bottom:8px;margin-bottom:10px}
+      .r-finding{display:flex;gap:10px;padding:9px 0;border-bottom:.5px solid #f3f4f6}
+      .r-finding:last-child{border-bottom:none}
+      .r-dot{width:7px;height:7px;border-radius:50%;background:#dc2626;margin-top:6px;flex-shrink:0}
+      .r-badge{font-size:10px;font-family:'DM Mono',monospace;padding:2px 7px;border-radius:4px;white-space:nowrap;height:fit-content;margin-top:2px;flex-shrink:0}
+      .rb-Critical{background:#fee2e2;color:#991b1b}.rb-High{background:#fef3c7;color:#92400e}.rb-Medium{background:#dbeafe;color:#1e40af}
+      .r-finding-text strong{font-size:13px;font-weight:600;display:block;margin-bottom:3px}
+      .r-finding-text p{font-size:12px;color:#4b5563;margin:0;line-height:1.6}
+      .r-pass-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+      .r-pass-item{display:flex;align-items:flex-start;gap:6px;font-size:12px;color:#374151;padding:6px 8px;background:#f0fdf4;border-radius:6px}
+      .r-pass-dot{width:6px;height:6px;border-radius:50%;background:#16a34a;flex-shrink:0;margin-top:5px}
+      .r-footer{margin-top:28px;padding-top:16px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;font-size:11px;color:#9ca3af;flex-wrap:wrap;gap:4px}
+    </style></head><body>${el.innerHTML}</body></html>`)
+    w.document.close()
+    setTimeout(() => w.print(), 400)
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-4 px-3" style={{ background: "rgba(8,13,20,0.95)" }}>
       <div className="bg-[#0d1520] border border-[#1e3a5f] rounded-xl w-full max-w-2xl shadow-2xl overflow-y-auto" style={{ maxHeight: "96vh" }}>
+
+        {/* Modal header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#1a2d45]">
           <div>
             <p className="text-[11px] font-mono text-[#60a5fa] uppercase tracking-wider mb-0.5">Review Complete</p>
-            <p className="text-[15px] font-semibold text-[#e8f0fe]">Export Findings</p>
+            <p className="text-[15px] font-semibold text-[#e8f0fe]">
+              {stage === "done" ? "Security Snapshot Report" : "Generate Report"}
+            </p>
           </div>
           <button onClick={onClose} className="text-[#7a9abf] hover:text-[#e8f0fe] text-xl px-1">×</button>
         </div>
 
         <div className="p-5">
-          <div className="bg-[#080d14] border border-[#1a2d45] rounded-xl p-4 mb-4">
-            <div className="flex items-start justify-between gap-3 mb-3">
+
+          {/* Score summary — always visible */}
+          <div className="bg-[#080d14] border border-[#1a2d45] rounded-xl p-4 mb-5">
+            <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-[13px] font-semibold text-[#e8f0fe]">{engagement.company}</p>
                 <p className="text-[11px] text-[#7a9abf]">{formatDate(engagement.createdAt)} · {formatDuration(engagement.duration || 0)}</p>
               </div>
-              <div className="flex items-center gap-3">
-                {(() => { const { pass, fail } = calcScore(engagement.checks); return (
-                  <>
-                    <div className="text-center"><p className="text-[16px] font-semibold text-green-400">{pass}</p><p className="text-[10px] font-mono text-[#3d5a7a]">PASS</p></div>
-                    <div className="text-center"><p className="text-[16px] font-semibold text-red-400">{fail}</p><p className="text-[10px] font-mono text-[#3d5a7a]">FAIL</p></div>
-                  </>
-                )})()}
+              <div className="flex items-center gap-4">
+                <div className="text-center"><p className="text-[18px] font-semibold text-green-400">{pass}</p><p className="text-[10px] font-mono text-[#3d5a7a]">PASS</p></div>
+                <div className="text-center"><p className="text-[18px] font-semibold text-red-400">{fail}</p><p className="text-[10px] font-mono text-[#3d5a7a]">FAIL</p></div>
+                <div className="text-center"><p className="text-[18px] font-semibold text-[#60a5fa]">{pct}%</p><p className="text-[10px] font-mono text-[#3d5a7a]">SCORE</p></div>
               </div>
             </div>
           </div>
 
-          <div className="bg-[#080d14] border border-[#1a2d45] rounded-xl p-4 mb-4 max-h-64 overflow-y-auto">
-            <pre className="text-[11px] font-mono text-[#7a9abf] whitespace-pre-wrap leading-relaxed">{text}</pre>
-          </div>
+          {/* READY state */}
+          {stage === "ready" && (
+            <>
+              <div className="bg-[#111d2e] border border-[#1a2d45] rounded-xl p-4 mb-5">
+                <p className="text-[12px] font-semibold text-[#e8f0fe] mb-1">What happens next</p>
+                <p className="text-[12px] text-[#7a9abf] leading-relaxed">Claude will read your findings and write a plain-English report — executive summary, prioritized findings with explanations, and what's working well. Ready to print or send in under 30 seconds.</p>
+              </div>
+              <button onClick={generateReport}
+                className="w-full text-[14px] font-mono text-white bg-[#3b82f6] py-3 rounded-xl hover:bg-[#2563eb] transition-colors">
+                Generate Plain-English Report →
+              </button>
+            </>
+          )}
 
-          <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 mb-4">
-            <p className="text-[12px] font-semibold text-[#60a5fa] mb-1">Next step</p>
-            <p className="text-[12px] text-[#7a9abf] leading-relaxed">Copy this output and paste it into Claude with the message: <span className="text-[#e8f0fe] font-mono">"Generate a plain-English M365 security report from these findings."</span> Edit the draft, export as PDF, send to client.</p>
-          </div>
+          {/* GENERATING state */}
+          {stage === "generating" && (
+            <div className="flex flex-col items-center justify-center py-12 gap-4">
+              <div className="w-8 h-8 border-2 border-[#1e3a5f] border-t-[#60a5fa] rounded-full animate-spin" />
+              <p className="text-[13px] font-mono text-[#60a5fa]">Writing report for {engagement.company}…</p>
+              <p className="text-[11px] text-[#3d5a7a]">This takes about 10–15 seconds</p>
+            </div>
+          )}
 
-          <button onClick={onCopy}
-            className={`w-full text-[14px] font-mono py-3 rounded-xl border transition-all ${copied ? "text-green-400 border-green-500/40 bg-green-500/10" : "text-white bg-[#3b82f6] border-transparent hover:bg-[#2563eb]"}`}>
-            {copied ? "✓ Copied to clipboard — paste into Claude" : "Copy to Clipboard"}
-          </button>
+          {/* ERROR state */}
+          {stage === "error" && (
+            <>
+              <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 mb-4">
+                <p className="text-[12px] text-red-400">{errorMsg}</p>
+              </div>
+              <button onClick={generateReport}
+                className="w-full text-[14px] font-mono text-white bg-[#3b82f6] py-3 rounded-xl hover:bg-[#2563eb] transition-colors">
+                Try Again
+              </button>
+            </>
+          )}
+
+          {/* DONE state — rendered report */}
+          {stage === "done" && report && (
+            <>
+              <div className="flex gap-2 mb-4">
+                <button onClick={printReport}
+                  className="flex-1 text-[12px] font-mono text-white bg-green-600 py-2 rounded-lg hover:bg-green-700 transition-colors">
+                  Print / Save PDF
+                </button>
+                <button onClick={() => setStage("ready")}
+                  className="text-[12px] font-mono text-[#7a9abf] border border-[#1a2d45] px-4 py-2 rounded-lg hover:text-[#e8f0fe] hover:border-[#1e3a5f] transition-colors">
+                  Regenerate
+                </button>
+              </div>
+
+              {/* White report card */}
+              <div id="ac-report-print-target" style={{
+                background: "#fff", borderRadius: 12, padding: "32px 36px",
+                color: "#111", fontFamily: "'DM Sans', sans-serif", lineHeight: 1.6
+              }}>
+                {/* Masthead */}
+                <div style={{ borderBottom: "1.5px solid #e5e7eb", paddingBottom: 18, marginBottom: 20 }}>
+                  <p style={{ fontFamily: "monospace", fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#6b7280", marginBottom: 6 }}>Amazin Cyber Solutions — Confidential</p>
+                  <p style={{ fontSize: 24, fontWeight: 600, color: "#111", marginBottom: 4 }}>Microsoft 365 Security Snapshot</p>
+                  <div style={{ fontSize: 12, color: "#6b7280", display: "flex", gap: 20, flexWrap: "wrap", marginTop: 6 }}>
+                    <span>Prepared for: <strong style={{ color: "#374151" }}>{engagement.clientName ? `${engagement.clientName}, ` : ""}{engagement.company}</strong></span>
+                    <span>Package: <strong style={{ color: "#374151" }}>{engagement.package}</strong></span>
+                    <span>Reviewed: <strong style={{ color: "#374151" }}>{formatDate(engagement.createdAt)}</strong></span>
+                    {engagement.duration > 0 && <span>Duration: <strong style={{ color: "#374151" }}>{formatDuration(engagement.duration)}</strong></span>}
+                  </div>
+                </div>
+
+                {/* Score row */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 22 }}>
+                  {[["PASSING", pass, "#15803d"], ["NEEDS ATTENTION", fail, "#b91c1c"], ["OVERALL SCORE", `${pct}%`, "#1d4ed8"]].map(([lbl, val, col]) => (
+                    <div key={lbl} style={{ background: "#f9fafb", borderRadius: 8, padding: "12px 14px", textAlign: "center", border: "1px solid #f3f4f6" }}>
+                      <div style={{ fontSize: 26, fontWeight: 600, color: col, lineHeight: 1 }}>{val}</div>
+                      <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 4, fontFamily: "monospace", textTransform: "uppercase", letterSpacing: "0.06em" }}>{lbl}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Executive summary */}
+                <div style={{ background: "#fef9f2", borderLeft: "3px solid #d97706", borderRadius: "0 8px 8px 0", padding: "12px 16px", marginBottom: 22 }}>
+                  <p style={{ fontFamily: "monospace", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: "#d97706", marginBottom: 8 }}>Executive Summary</p>
+                  <p style={{ fontSize: 14, color: "#374151", lineHeight: 1.7, margin: 0 }}>{report.executiveSummary}</p>
+                </div>
+
+                {/* Findings */}
+                {report.findings?.length > 0 && (
+                  <div style={{ marginBottom: 20 }}>
+                    <p style={{ fontSize: 16, fontWeight: 600, color: "#111", borderBottom: "1px solid #e5e7eb", paddingBottom: 8, marginBottom: 10 }}>Findings — What Needs Attention</p>
+                    {report.findings.map((f, i) => (
+                      <div key={i} style={{ display: "flex", gap: 10, padding: "9px 0", borderBottom: i < report.findings.length - 1 ? "0.5px solid #f3f4f6" : "none" }}>
+                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#dc2626", marginTop: 6, flexShrink: 0 }} />
+                        <div>
+                          <span style={{ fontSize: 10, fontFamily: "monospace", padding: "2px 7px", borderRadius: 4,
+                            background: f.severity === "Critical" ? "#fee2e2" : f.severity === "High" ? "#fef3c7" : "#dbeafe",
+                            color: f.severity === "Critical" ? "#991b1b" : f.severity === "High" ? "#92400e" : "#1e40af",
+                            marginRight: 8 }}>{f.severity}</span>
+                          <strong style={{ fontSize: 13, fontWeight: 600 }}>{f.title}</strong>
+                          <p style={{ fontSize: 12, color: "#4b5563", marginTop: 3, lineHeight: 1.6 }}>{f.explanation}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Pass items */}
+                {report.passItems?.length > 0 && (
+                  <div style={{ marginBottom: 20 }}>
+                    <p style={{ fontSize: 16, fontWeight: 600, color: "#111", borderBottom: "1px solid #e5e7eb", paddingBottom: 8, marginBottom: 10 }}>What's Working Well</p>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                      {report.passItems.map((p, i) => (
+                        <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: 12, color: "#374151", padding: "6px 8px", background: "#f0fdf4", borderRadius: 6, border: "1px solid #dcfce7" }}>
+                          <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#16a34a", flexShrink: 0, marginTop: 5 }} />
+                          <span>{p}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Footer */}
+                <div style={{ marginTop: 24, paddingTop: 14, borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", fontSize: 11, color: "#9ca3af", flexWrap: "wrap", gap: 4 }}>
+                  <span>Prepared by Oshé · Amazin Cyber Solutions · amazincyber.com</span>
+                  <span>Confidential — for {engagement.company} only</span>
+                </div>
+              </div>
+            </>
+          )}
+
         </div>
       </div>
     </div>
