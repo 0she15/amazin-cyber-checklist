@@ -650,10 +650,22 @@ Respond with ONLY a valid JSON object (no markdown, no backticks):
       "explanation": "2-3 sentences. What this setting is, what could go wrong if it is not fixed, and why it matters to this specific business. No jargon. If a technical term is unavoidable, define it in parentheses."
     }
   ],
+  "priorityActions": {
+    "immediate": ["Action the business can take this week — plain English, specific, actionable. No jargon."],
+    "thirtyDays": ["Action to complete within 30 days — slightly more involved but still practical."],
+    "future": ["Longer-term improvement — may require additional licensing or planning."]
+  },
   "passItems": ["Short plain-English phrase describing what is working — rewrite, do not copy verbatim"]
 }
 
-Rules: findings = only FAILED checks, sorted Critical → High → Medium. passItems = only PASSING checks. Tone: calm, honest, reassuring. Never alarming or dismissive.`
+Rules:
+- findings = only FAILED checks, sorted Critical → High → Medium
+- priorityActions.immediate = Critical and High findings that can be fixed this week (max 4 items)
+- priorityActions.thirtyDays = High and Medium findings requiring more planning (max 4 items)
+- priorityActions.future = Medium findings or improvements requiring licensing/infrastructure changes (max 3 items)
+- passItems = only PASSING checks
+- Tone: calm, honest, reassuring. Never alarming or dismissive.
+- Every action must be specific enough to act on — never write "improve security" or "review settings". Write "Enable MFA for the 8 accounts that currently don't have it."`
 
     try {
       const res = await fetch("/api/generate-report", {
@@ -661,7 +673,7 @@ Rules: findings = only FAILED checks, sorted Critical → High → Medium. passI
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-5",
-          max_tokens: 2000,
+          max_tokens: 2500,
           messages: [{ role: "user", content: prompt }]
         })
       })
@@ -797,6 +809,28 @@ Rules: findings = only FAILED checks, sorted Critical → High → Medium. passI
                   className="flex-1 text-[12px] font-mono text-white bg-green-600 py-2 rounded-lg hover:bg-green-700 transition-colors">
                   Print / Save PDF
                 </button>
+                <button onClick={() => {
+                  const fails = []
+                  SECTIONS.forEach(s => s.checks.forEach(c => {
+                    if (engagement.checks?.[c.id]?.result === "fail") fails.push(c.label)
+                  }))
+                  const params = new URLSearchParams({
+                    company: engagement.company || "",
+                    clientName: engagement.clientName || "",
+                    package: "Remediation Support — $1,000+",
+                    licenseType: engagement.licenseType || "",
+                    userCount: engagement.userCount || "",
+                    concerns: fails.slice(0, 5).join("; "),
+                    callNotes: `Security Snapshot completed ${formatDate(engagement.createdAt)}. Score: ${pass} pass / ${fail} fail (${pct}%). Key findings: ${fails.slice(0, 3).join(", ")}.`,
+                    urgency: fail >= 3 ? "Recent security incident" : "Standard",
+                    riskLevel: fail >= 5 ? "High" : fail >= 2 ? "Medium" : "Low",
+                    autoGenerate: "true",
+                  })
+                  window.open(`https://proposals.amazincyber.com?${params.toString()}`, "_blank")
+                }}
+                  className="flex-1 text-[12px] font-mono text-white bg-purple-600 py-2 rounded-lg hover:bg-purple-700 transition-colors">
+                  Generate Remediation Proposal →
+                </button>
                 <button onClick={() => setStage("ready")}
                   className="text-[12px] font-mono text-[#7a9abf] border border-[#1a2d45] px-4 py-2 rounded-lg hover:text-[#e8f0fe] hover:border-[#1e3a5f] transition-colors">
                   Regenerate
@@ -853,6 +887,34 @@ Rules: findings = only FAILED checks, sorted Critical → High → Medium. passI
                         </div>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {/* Priority Actions */}
+                {report.priorityActions && (
+                  <div style={{ marginBottom: 20 }}>
+                    <p style={{ fontSize: 16, fontWeight: 600, color: "#111", borderBottom: "1px solid #e5e7eb", paddingBottom: 8, marginBottom: 14 }}>Priority Actions</p>
+                    {[
+                      { key: "immediate", label: "Immediate — This Week", dot: "#dc2626", bg: "#fff7f7", border: "#fecaca" },
+                      { key: "thirtyDays", label: "Next 30 Days", dot: "#d97706", bg: "#fffbf0", border: "#fde68a" },
+                      { key: "future", label: "Future Improvements", dot: "#1d4ed8", bg: "#f0f7ff", border: "#bfdbfe" },
+                    ].map(({ key, label, dot, bg, border }) => {
+                      const items = report.priorityActions[key]
+                      if (!items?.length) return null
+                      return (
+                        <div key={key} style={{ marginBottom: 12 }}>
+                          <p style={{ fontSize: 11, fontFamily: "monospace", textTransform: "uppercase", letterSpacing: "0.08em", color: dot, marginBottom: 6, fontWeight: 600 }}>{label}</p>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            {items.map((item, i) => (
+                              <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 10px", background: bg, borderRadius: 6, border: `1px solid ${border}` }}>
+                                <span style={{ fontFamily: "monospace", fontSize: 11, color: dot, fontWeight: 700, flexShrink: 0, marginTop: 1 }}>{i + 1}.</span>
+                                <span style={{ fontSize: 13, color: "#374151", lineHeight: 1.5 }}>{item}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
 
