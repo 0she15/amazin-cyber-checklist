@@ -661,7 +661,7 @@ Rules: findings = only FAILED checks, sorted Critical → High → Medium. passI
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-5",
-          max_tokens: 1000,
+          max_tokens: 2000,
           messages: [{ role: "user", content: prompt }]
         })
       })
