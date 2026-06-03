@@ -149,6 +149,7 @@ function formatDuration(ms) {
   const s = Math.floor((ms % 60000) / 1000)
   return `${m}m ${s.toString().padStart(2, "0")}s`
 }
+function todayISODate() { return new Date().toISOString().slice(0, 10) }
 function calcProgress(checks) {
   const total = SECTIONS.reduce((n, s) => n + s.checks.length, 0)
   const done = Object.values(checks || {}).filter(v => v.result).length
@@ -190,6 +191,82 @@ function calcGrade(checks) {
   return           { grade: "F",  plus: false, color: "#dc2626", bg: "#fef2f2", border: "#fca5a5" }
 }
 
+function getChecklistStats(checks) {
+  const totalChecks = SECTIONS.reduce((n, s) => n + s.checks.length, 0)
+  const completedCount = Object.values(checks || {}).filter(v => v.result).length
+  const completionPct = Math.round((completedCount / totalChecks) * 100)
+  return { totalChecks, completedCount, completionPct }
+}
+
+function getReportQualityIssues(engagement) {
+  const { completedCount, completionPct } = getChecklistStats(engagement.checks)
+  const issues = []
+  if (!engagement.reviewerName?.trim()) issues.push("Reviewer name is required.")
+  if (!engagement.reviewDate?.trim()) issues.push("Review date is required.")
+  if (!engagement.scope?.trim()) issues.push("Review scope is required.")
+  if (completionPct < 60) issues.push("At least 60% of checklist items must be completed.")
+  if (completedCount < 20) issues.push("Complete at least 20 checklist items before generating a client report.")
+  return issues
+}
+
+function buildStructuredReportPayload(engagement) {
+  const { pass, fail } = calcScore(engagement.checks)
+  const { totalChecks, completedCount, completionPct } = getChecklistStats(engagement.checks)
+  const total = pass + fail
+  const pct = total ? Math.round((pass / total) * 100) : 0
+  const grade = calcGrade(engagement.checks)
+  const gradeSuffix = grade ? (grade.plus ? "+" : grade.minus ? "−" : "") : ""
+  const gradeLabel = grade ? `${grade.grade}${gradeSuffix}` : "Not calculated"
+  const failed = []
+  const passing = []
+  const notApplicable = []
+
+  SECTIONS.forEach(section => {
+    section.checks.forEach(check => {
+      const r = engagement.checks?.[check.id]
+      const item = {
+        id: check.id,
+        section: section.label,
+        label: check.label,
+        severity: SEVERITY_META[check.severity]?.label || check.severity,
+        notes: r?.notes || "",
+      }
+      if (r?.result === "fail") failed.push(item)
+      if (r?.result === "pass") passing.push(item)
+      if (r?.result === "na") notApplicable.push(item)
+    })
+  })
+
+  return {
+    client: {
+      company: engagement.company || "",
+      clientName: engagement.clientName || "",
+      package: engagement.package || "Business Snapshot",
+      licenseType: engagement.licenseType || "",
+      userCount: engagement.userCount || "",
+      reviewerName: engagement.reviewerName || "",
+      reviewDate: engagement.reviewDate || "",
+      scope: engagement.scope || "",
+      secureScoreNotes: engagement.secureScoreNotes || "",
+    },
+    score: { pass, fail, total, pct, grade: gradeLabel, completionPct, completedCount, totalChecks },
+    checks: { failed, passing, notApplicable },
+  }
+}
+
+function buildProposalSummary(engagement, pass, fail, pct) {
+  const fails = []
+  SECTIONS.forEach(s => s.checks.forEach(c => {
+    if (engagement.checks?.[c.id]?.result === "fail") fails.push(c.label)
+  }))
+  return [
+    `Security Snapshot completed ${formatDate(engagement.createdAt)} for ${engagement.company}.`,
+    `Score: ${pass} pass / ${fail} fail (${pct}%).`,
+    `Suggested package: Remediation Support — $1,000+.`,
+    fails.length ? `Key findings: ${fails.slice(0, 5).join("; ")}.` : "No failed checks were recorded.",
+  ].join("\n")
+}
+
 // ── EXPORT BUILDER (kept for reference / future use) ───────────────────────
 function buildExport(engagement) {
   const lines = []
@@ -227,7 +304,7 @@ export default function Checklist() {
   const [activeId, setActiveId] = useState(null)
   const [showExport, setShowExport] = useState(false)
   const [timerRunning, setTimerRunning] = useState(false)
-  const [newForm, setNewForm] = useState({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", notes: "" })
+  const [newForm, setNewForm] = useState({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
   const timerRef = useRef(null)
 
   // Load
@@ -259,10 +336,11 @@ export default function Checklist() {
   const active = engagements.find(e => e.id === activeId)
 
   const createEngagement = () => {
-    if (!newForm.clientName || !newForm.company) { alert("Client name and company are required."); return }
+    if (!newForm.clientName || !newForm.company || !newForm.reviewerName || !newForm.reviewDate || !newForm.scope) { alert("Client name, company, reviewer name, review date, and scope are required."); return }
     const eng = {
       id: uid(),
       ...newForm,
+      reviewDate: newForm.reviewDate || todayISODate(),
       checks: {},
       duration: 0,
       createdAt: new Date().toISOString(),
@@ -272,7 +350,7 @@ export default function Checklist() {
     setActiveId(eng.id)
     setView("active")
     setTimerRunning(true)
-    setNewForm({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", notes: "" })
+    setNewForm({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
   }
 
   const setCheckResult = (checkId, result) => {
@@ -456,6 +534,25 @@ function NewReviewForm({ form, setForm, onCreate }) {
               className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
           </div>
         </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Reviewer Name *</label>
+            <input value={form.reviewerName} onChange={e => set("reviewerName", e.target.value)}
+              placeholder="Oshé"
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Date *</label>
+            <input type="date" value={form.reviewDate} onChange={e => set("reviewDate", e.target.value)}
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
+          </div>
+        </div>
+        <div>
+          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Scope *</label>
+          <textarea value={form.scope} onChange={e => set("scope", e.target.value)} rows={3}
+            placeholder="Example: Microsoft 365 tenant security settings reviewed through Entra ID, Exchange admin center, Defender, SharePoint, and Secure Score."
+            className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors resize-none" />
+        </div>
         <div>
           <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Pre-Review Notes</label>
           <textarea value={form.notes} onChange={e => set("notes", e.target.value)} rows={3}
@@ -536,6 +633,7 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
   const { pass, fail } = calcScore(engagement.checks)
   const totalChecks = SECTIONS.reduce((n, s) => n + s.checks.length, 0)
   const doneChecks = Object.values(engagement.checks || {}).filter(v => v.result).length
+  const qualityIssues = getReportQualityIssues(engagement)
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -562,6 +660,43 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
         <div className="mt-3 h-1.5 bg-[#1a2d45] rounded-full overflow-hidden">
           <div className="h-full bg-gradient-to-r from-[#3b82f6] to-[#60a5fa] rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
         </div>
+      </div>
+
+      {/* Report quality gate */}
+      <div className={`border rounded-xl p-4 mb-5 ${qualityIssues.length ? "bg-amber-500/10 border-amber-500/30" : "bg-green-500/10 border-green-500/30"}`}>
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <p className={`text-[12px] font-semibold ${qualityIssues.length ? "text-amber-300" : "text-green-300"}`}>Report Quality Gate</p>
+            <p className="text-[11px] text-[#7a9abf]">Client reports require scope, reviewer, date, and minimum completion before generation.</p>
+          </div>
+          <span className={`text-[10px] font-mono px-2 py-1 rounded border ${qualityIssues.length ? "text-amber-300 border-amber-500/30" : "text-green-300 border-green-500/30"}`}>
+            {qualityIssues.length ? `${qualityIssues.length} blocker${qualityIssues.length === 1 ? "" : "s"}` : "Ready"}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+          <div>
+            <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Reviewer Name *</label>
+            <input value={engagement.reviewerName || ""} onChange={e => onUpdateField("reviewerName", e.target.value)}
+              placeholder="Reviewer name"
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
+          </div>
+          <div>
+            <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Date *</label>
+            <input type="date" value={engagement.reviewDate || ""} onChange={e => onUpdateField("reviewDate", e.target.value)}
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6] transition-colors" />
+          </div>
+        </div>
+        <div>
+          <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Scope *</label>
+          <textarea value={engagement.scope || ""} onChange={e => onUpdateField("scope", e.target.value)} rows={3}
+            placeholder="Describe the tenant, tools, and M365 areas reviewed."
+            className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors resize-none" />
+        </div>
+        {qualityIssues.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {qualityIssues.map(issue => <li key={issue} className="text-[11px] text-amber-200">• {issue}</li>)}
+          </ul>
+        )}
       </div>
 
       {/* Sections */}
@@ -677,6 +812,7 @@ function ExportModal({ engagement, onClose }) {
   const [stage, setStage] = useState("ready") // ready | generating | done | error
   const [report, setReport] = useState(null)
   const [errorMsg, setErrorMsg] = useState("")
+  const [proposalStatus, setProposalStatus] = useState("")
 
   const { pass, fail } = calcScore(engagement.checks)
   const total = pass + fail
@@ -684,86 +820,31 @@ function ExportModal({ engagement, onClose }) {
   const grade = calcGrade(engagement.checks)
   const gradeSuffix = grade ? (grade.plus ? "+" : grade.minus ? "−" : "") : ""
   const gradeLabel = grade ? `${grade.grade}${gradeSuffix}` : null
+  const qualityIssues = getReportQualityIssues(engagement)
+  const canGenerateReport = qualityIssues.length === 0
 
   async function generateReport() {
+    if (!canGenerateReport) {
+      setErrorMsg(`Report is not ready: ${qualityIssues.join(" ")}`)
+      setStage("error")
+      return
+    }
+
     setStage("generating")
     setErrorMsg("")
-
-    const failLines = []
-    const passLines = []
-    SECTIONS.forEach(section => {
-      section.checks.forEach(check => {
-        const r = engagement.checks?.[check.id]
-        const sev = SEVERITY_META[check.severity]?.label || check.severity
-        const notes = r?.notes ? ` (Notes: ${r.notes})` : ""
-        if (r?.result === "fail") failLines.push(`[${sev}] ${check.label}${notes}`)
-        if (r?.result === "pass") passLines.push(`[${sev}] ${check.label}`)
-      })
-    })
-
-    const prompt = `You are writing a Microsoft 365 Security Snapshot report for a small business owner. The audience is non-technical.
-
-CLIENT: ${engagement.company}${engagement.clientName ? ` (${engagement.clientName})` : ""}
-PACKAGE: ${engagement.package || "Business Snapshot"}
-REVIEW DATE: ${formatDate(engagement.createdAt)}
-SCORE: ${pass} pass / ${fail} fail out of ${total} checks (${pct}%)
-SECURITY GRADE: ${gradeLabel || "Not calculated"}
-${engagement.licenseType ? `LICENSE: ${engagement.licenseType}` : ""}
-${engagement.userCount ? `USERS: ${engagement.userCount}` : ""}
-${engagement.secureScoreNotes ? `SECURE SCORE NOTES: ${engagement.secureScoreNotes}` : ""}
-
-FAILED CHECKS (needs attention):
-${failLines.join("\n") || "None"}
-
-PASSING CHECKS (working well):
-${passLines.join("\n") || "None"}
-
-Respond with ONLY a valid JSON object (no markdown, no backticks):
-{
-  "executiveSummary": "2-3 sentences. Lead with what is working. Name the most critical risks plainly. End with the priority action. Define any technical term on first use.",
-  "findings": [
-    {
-      "severity": "Critical|High|Medium",
-      "title": "Short plain-English title — rewrite the checklist item, do not copy it verbatim",
-      "explanation": "2-3 sentences. What this setting is, what could go wrong if it is not fixed, and why it matters to this specific business. No jargon. If a technical term is unavoidable, define it in parentheses."
-    }
-  ],
-  "priorityActions": {
-    "immediate": ["Action the business can take this week — plain English, specific, actionable. No jargon."],
-    "thirtyDays": ["Action to complete within 30 days — slightly more involved but still practical."],
-    "future": ["Longer-term improvement — may require additional licensing or planning."]
-  },
-  "passItems": ["Short plain-English phrase describing what is working — rewrite, do not copy verbatim"]
-}
-
-Rules:
-- findings = only FAILED checks, sorted Critical → High → Medium
-- priorityActions.immediate = Critical and High findings that can be fixed this week (max 4 items)
-- priorityActions.thirtyDays = High and Medium findings requiring more planning (max 4 items)
-- priorityActions.future = Medium findings or improvements requiring licensing/infrastructure changes (max 3 items)
-- passItems = only PASSING checks
-- Tone: calm, honest, reassuring. Never alarming or dismissive.
-- Every action must be specific enough to act on — never write "improve security" or "review settings". Write "Enable MFA for the 8 accounts that currently don't have it."`
 
     try {
       const res = await fetch("/api/generate-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-5",
-          max_tokens: 2500,
-          messages: [{ role: "user", content: prompt }]
-        })
+        body: JSON.stringify(buildStructuredReportPayload(engagement))
       })
       const data = await res.json()
       if (!res.ok) {
         const msg = data?.error || `Error ${res.status}`
         throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg))
       }
-      const text = (data.content || []).map(b => b.text || "").join("")
-      const clean = text.replace(/```json|```/g, "").trim()
-      const parsed = JSON.parse(clean)
-      setReport(parsed)
+      setReport(data.report)
       setStage("done")
     } catch (e) {
       setErrorMsg(e.message || "Something went wrong. Try again.")
@@ -854,10 +935,18 @@ Rules:
             <>
               <div className="bg-[#111d2e] border border-[#1a2d45] rounded-xl p-4 mb-5">
                 <p className="text-[12px] font-semibold text-[#e8f0fe] mb-1">What happens next</p>
-                <p className="text-[12px] text-[#7a9abf] leading-relaxed">Claude will read your findings and write a plain-English report — executive summary, prioritized findings with explanations, and what's working well. Ready to print or send in under 30 seconds.</p>
+                <p className="text-[12px] text-[#7a9abf] leading-relaxed">The server will validate your structured checklist data, apply locked report instructions, and write a plain-English report — executive summary, prioritized findings with explanations, and what's working well.</p>
               </div>
-              <button onClick={generateReport}
-                className="w-full text-[14px] font-mono text-white bg-[#3b82f6] py-3 rounded-xl hover:bg-[#2563eb] transition-colors">
+              {!canGenerateReport && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 mb-4">
+                  <p className="text-[12px] font-semibold text-amber-300 mb-2">Report blocked until quality gates are complete</p>
+                  <ul className="space-y-1">
+                    {qualityIssues.map(issue => <li key={issue} className="text-[11px] text-amber-200">• {issue}</li>)}
+                  </ul>
+                </div>
+              )}
+              <button onClick={generateReport} disabled={!canGenerateReport}
+                className={`w-full text-[14px] font-mono text-white py-3 rounded-xl transition-colors ${canGenerateReport ? "bg-[#3b82f6] hover:bg-[#2563eb]" : "bg-[#1a2d45] cursor-not-allowed opacity-60"}`}>
                 Generate Plain-English Report →
               </button>
             </>
@@ -893,33 +982,27 @@ Rules:
                   className="flex-1 text-[12px] font-mono text-white bg-green-600 py-2 rounded-lg hover:bg-green-700 transition-colors">
                   Print / Save PDF
                 </button>
-                <button onClick={() => {
-                  const fails = []
-                  SECTIONS.forEach(s => s.checks.forEach(c => {
-                    if (engagement.checks?.[c.id]?.result === "fail") fails.push(c.label)
-                  }))
-                  const params = new URLSearchParams({
-                    company: engagement.company || "",
-                    clientName: engagement.clientName || "",
-                    package: "Remediation Support — $1,000+",
-                    licenseType: engagement.licenseType || "",
-                    userCount: engagement.userCount || "",
-                    concerns: fails.slice(0, 5).join("; "),
-                    callNotes: `Security Snapshot completed ${formatDate(engagement.createdAt)}. Score: ${pass} pass / ${fail} fail (${pct}%). Key findings: ${fails.slice(0, 3).join(", ")}.`,
-                    urgency: fail >= 3 ? "Recent security incident" : "Standard",
-                    riskLevel: fail >= 5 ? "High" : fail >= 2 ? "Medium" : "Low",
-                    autoGenerate: "true",
-                  })
-                  window.open(`https://proposals.amazincyber.com?${params.toString()}`, "_blank")
+                <button onClick={async () => {
+                  const summary = buildProposalSummary(engagement, pass, fail, pct)
+                  try {
+                    await navigator.clipboard?.writeText(summary)
+                    setProposalStatus("Opened the proposal tool with a clean URL. A remediation summary was copied for manual paste.")
+                  } catch {
+                    setProposalStatus("Opened the proposal tool with a clean URL. Copy findings manually from this report.")
+                  }
+                  window.open("https://proposals.amazincyber.com", "_blank", "noopener,noreferrer")
                 }}
                   className="flex-1 text-[12px] font-mono text-white bg-purple-600 py-2 rounded-lg hover:bg-purple-700 transition-colors">
-                  Generate Remediation Proposal →
+                  Open Proposal Tool →
                 </button>
                 <button onClick={() => setStage("ready")}
                   className="text-[12px] font-mono text-[#7a9abf] border border-[#1a2d45] px-4 py-2 rounded-lg hover:text-[#e8f0fe] hover:border-[#1e3a5f] transition-colors">
                   Regenerate
                 </button>
               </div>
+              {proposalStatus && (
+                <p className="text-[11px] text-purple-200 bg-purple-500/10 border border-purple-500/30 rounded-lg px-3 py-2 mb-4">{proposalStatus}</p>
+              )}
 
               {/* White report card */}
               <div id="ac-report-print-target" style={{
@@ -933,7 +1016,7 @@ Rules:
                   <div style={{ fontSize: 12, color: "#6b7280", display: "flex", gap: 20, flexWrap: "wrap", marginTop: 6 }}>
                     <span>Prepared for: <strong style={{ color: "#374151" }}>{engagement.clientName ? `${engagement.clientName}, ` : ""}{engagement.company}</strong></span>
                     <span>Package: <strong style={{ color: "#374151" }}>{engagement.package}</strong></span>
-                    <span>Reviewed: <strong style={{ color: "#374151" }}>{formatDate(engagement.createdAt)}</strong></span>
+                    <span>Reviewed: <strong style={{ color: "#374151" }}>{formatDate(engagement.reviewDate || engagement.createdAt)}</strong></span>
                     {engagement.duration > 0 && <span>Duration: <strong style={{ color: "#374151" }}>{formatDuration(engagement.duration)}</strong></span>}
                   </div>
                 </div>
@@ -966,6 +1049,11 @@ Rules:
                 <div style={{ background: "#fef9f2", borderLeft: "3px solid #d97706", borderRadius: "0 8px 8px 0", padding: "12px 16px", marginBottom: 22 }}>
                   <p style={{ fontFamily: "monospace", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: "#d97706", marginBottom: 8 }}>Executive Summary</p>
                   <p style={{ fontSize: 14, color: "#374151", lineHeight: 1.7, margin: 0 }}>{report.executiveSummary}</p>
+                </div>
+
+                <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: "10px 12px", marginBottom: 20 }}>
+                  <p style={{ fontFamily: "monospace", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: "#6b7280", marginBottom: 6 }}>Scope + Limitations</p>
+                  <p style={{ fontSize: 12, color: "#4b5563", lineHeight: 1.6, margin: 0 }}>{report.scopeAndLimitations || engagement.scope}</p>
                 </div>
 
                 {/* Findings */}
@@ -1033,7 +1121,7 @@ Rules:
 
                 {/* Footer */}
                 <div style={{ marginTop: 24, paddingTop: 14, borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", fontSize: 11, color: "#9ca3af", flexWrap: "wrap", gap: 4 }}>
-                  <span>Prepared by Oshé · Amazin Cyber Solutions · amazincyber.com</span>
+                  <span>Prepared by {engagement.reviewerName || "Amazin Cyber"} · Amazin Cyber Solutions · amazincyber.com</span>
                   <span>Confidential — for {engagement.company} only</span>
                 </div>
               </div>
