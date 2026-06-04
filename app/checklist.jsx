@@ -402,6 +402,11 @@ async function deleteReviewFromSupabase(session, reviewId) {
   })
 }
 
+async function loadLatestGeneratedReport(session, reviewId) {
+  const rows = await supabaseRequest(`/rest/v1/generated_reports?select=report,created_at&review_id=eq.${encodeURIComponent(reviewId)}&order=created_at.desc&limit=1`, { session })
+  return rows?.[0]?.report || null
+}
+
 // ── EXPORT BUILDER (kept for reference / future use) ───────────────────────
 function buildExport(engagement) {
   const lines = []
@@ -1116,6 +1121,20 @@ function ExportModal({ engagement, session, onClose }) {
   const gradeLabel = grade ? `${grade.grade}${gradeSuffix}` : null
   const qualityIssues = getReportQualityIssues(engagement)
   const canGenerateReport = qualityIssues.length === 0
+
+  useEffect(() => {
+    let cancelled = false
+    if (!session || !engagement?.id) return
+    loadLatestGeneratedReport(session, engagement.id)
+      .then(savedReport => {
+        if (!cancelled && savedReport) {
+          setReport(savedReport)
+          setStage("done")
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [session, engagement?.id])
 
   async function generateReport() {
     if (!canGenerateReport) {
