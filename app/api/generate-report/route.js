@@ -123,7 +123,7 @@ async function loadReviewPayloadFromSupabase(reviewId, token, userId) {
   if (!client) throw new Error("Client not found or access denied")
 
   const itemSelect = "check_id,result,notes"
-  const rows = await supabaseServerRequest(`/rest/v1/review_items?select=${encodeURIComponent(itemSelect)}&review_id=eq.${encodeURIComponent(review.id)}`, { token })
+  const rows = await supabaseServerRequest(`/rest/v1/review_items?select=${encodeURIComponent(itemSelect)}&review_id=eq.${encodeURIComponent(review.id)}&user_id=eq.${encodeURIComponent(userId)}`, { token })
   const seenIds = new Set()
   const failed = []
   const passing = []
@@ -177,12 +177,13 @@ async function loadReviewPayloadFromSupabase(reviewId, token, userId) {
   }
 }
 
-async function saveGeneratedReport(token, payload, report) {
+async function saveGeneratedReport(token, userId, payload, report) {
   await supabaseServerRequest("/rest/v1/generated_reports", {
     method: "POST",
     token,
     body: {
       review_id: payload.reviewId,
+      user_id: userId,
       report,
       score: payload.score,
     },
@@ -470,7 +471,7 @@ export async function POST(request) {
   }
 
   try {
-    await saveGeneratedReport(token, payload, report)
+    await saveGeneratedReport(token, user.id, payload, report)
   } catch {
     return Response.json({ error: "Report generated, but could not be saved to Supabase. Please try again." }, { status: 500 })
   }

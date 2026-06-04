@@ -20,6 +20,6 @@ The migration enables RLS on all app tables. Policies scope rows to `auth.uid()`
 - Refresh the browser and confirm the same signed-in user can reload review history from Supabase.
 - Sign out and confirm the review list disappears and no client review data remains visible in the UI.
 - Sign in as a different user in the same browser and confirm the previous user's reviews are not visible.
-- Complete at least 60% / 20 recognized checks, generate a report, and confirm a row is saved in `generated_reports` for that review.
+- Complete at least 60% / 20 recognized checks, generate a report, and confirm a row is saved in `generated_reports` with the authenticated user's `user_id`.
 - Reopen the report modal for that review and confirm the latest generated report loads from `generated_reports`.
 - Call `/api/generate-report` without a bearer token or with another user's review ID; it should fail.
