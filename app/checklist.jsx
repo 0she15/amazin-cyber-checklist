@@ -2,6 +2,49 @@
 import { useState, useEffect, useRef } from "react"
 
 const STORAGE_KEY = "amazin_checklists"
+const AUTH_STORAGE_KEY = "amazin_supabase_session"
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
+const SUPABASE_CONFIGURED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
+
+function supabaseHeaders(session, extra = {}) {
+  return {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${session?.access_token || SUPABASE_ANON_KEY}`,
+    ...extra,
+  }
+}
+
+async function supabaseRequest(path, { method = "GET", body, session, headers = {} } = {}) {
+  if (!SUPABASE_CONFIGURED) throw new Error("Supabase environment variables are not configured.")
+  const res = await fetch(`${SUPABASE_URL}${path}`, {
+    method,
+    headers: supabaseHeaders(session, {
+      "Content-Type": "application/json",
+      ...headers,
+    }),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const text = await res.text()
+  const data = text ? JSON.parse(text) : null
+  if (!res.ok) throw new Error(data?.message || data?.error_description || data?.error || `Supabase error ${res.status}`)
+  return data
+}
+
+async function authRequest(path, body) {
+  if (!SUPABASE_CONFIGURED) throw new Error("Supabase environment variables are not configured.")
+  const res = await fetch(`${SUPABASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `Auth error ${res.status}`)
+  return data
+}
 
 // ── CHECKLIST DATA ─────────────────────────────────────────────────────────
 const SECTIONS = [
@@ -149,6 +192,7 @@ function formatDuration(ms) {
   const s = Math.floor((ms % 60000) / 1000)
   return `${m}m ${s.toString().padStart(2, "0")}s`
 }
+function todayISODate() { return new Date().toISOString().slice(0, 10) }
 function calcProgress(checks) {
   const total = SECTIONS.reduce((n, s) => n + s.checks.length, 0)
   const done = Object.values(checks || {}).filter(v => v.result).length
@@ -190,6 +234,179 @@ function calcGrade(checks) {
   return           { grade: "F",  plus: false, color: "#dc2626", bg: "#fef2f2", border: "#fca5a5" }
 }
 
+function getChecklistStats(checks) {
+  const totalChecks = SECTIONS.reduce((n, s) => n + s.checks.length, 0)
+  const completedCount = Object.values(checks || {}).filter(v => v.result).length
+  const completionPct = Math.round((completedCount / totalChecks) * 100)
+  return { totalChecks, completedCount, completionPct }
+}
+
+function getReportQualityIssues(engagement) {
+  const { completedCount, completionPct } = getChecklistStats(engagement.checks)
+  const issues = []
+  if (!engagement.reviewerName?.trim()) issues.push("Reviewer name is required.")
+  if (!engagement.reviewDate?.trim()) issues.push("Review date is required.")
+  if (!engagement.scope?.trim()) issues.push("Review scope is required.")
+  if (completionPct < 60) issues.push("At least 60% of checklist items must be completed.")
+  if (completedCount < 20) issues.push("Complete at least 20 checklist items before generating a client report.")
+  return issues
+}
+
+function buildStructuredReportPayload(engagement) {
+  const { pass, fail } = calcScore(engagement.checks)
+  const { totalChecks, completedCount, completionPct } = getChecklistStats(engagement.checks)
+  const total = pass + fail
+  const pct = total ? Math.round((pass / total) * 100) : 0
+  const grade = calcGrade(engagement.checks)
+  const gradeSuffix = grade ? (grade.plus ? "+" : grade.minus ? "−" : "") : ""
+  const gradeLabel = grade ? `${grade.grade}${gradeSuffix}` : "Not calculated"
+  const failed = []
+  const passing = []
+  const notApplicable = []
+
+  SECTIONS.forEach(section => {
+    section.checks.forEach(check => {
+      const r = engagement.checks?.[check.id]
+      const item = {
+        id: check.id,
+        section: section.label,
+        label: check.label,
+        severity: SEVERITY_META[check.severity]?.label || check.severity,
+        notes: r?.notes || "",
+      }
+      if (r?.result === "fail") failed.push(item)
+      if (r?.result === "pass") passing.push(item)
+      if (r?.result === "na") notApplicable.push(item)
+    })
+  })
+
+  return {
+    client: {
+      company: engagement.company || "",
+      clientName: engagement.clientName || "",
+      package: engagement.package || "Business Snapshot",
+      licenseType: engagement.licenseType || "",
+      userCount: engagement.userCount || "",
+      reviewerName: engagement.reviewerName || "",
+      reviewDate: engagement.reviewDate || "",
+      scope: engagement.scope || "",
+      secureScoreNotes: engagement.secureScoreNotes || "",
+    },
+    score: { pass, fail, total, pct, grade: gradeLabel, completionPct, completedCount, totalChecks },
+    checks: { failed, passing, notApplicable },
+  }
+}
+
+function buildProposalSummary(engagement, pass, fail, pct) {
+  const fails = []
+  SECTIONS.forEach(s => s.checks.forEach(c => {
+    if (engagement.checks?.[c.id]?.result === "fail") fails.push(c.label)
+  }))
+  return [
+    `Security Snapshot completed ${formatDate(engagement.createdAt)} for ${engagement.company}.`,
+    `Score: ${pass} pass / ${fail} fail (${pct}%).`,
+    `Suggested package: Remediation Support — $1,000+.`,
+    fails.length ? `Key findings: ${fails.slice(0, 5).join("; ")}.` : "No failed checks were recorded.",
+  ].join("\n")
+}
+
+function reviewFromRow(row) {
+  const checks = {}
+  ;(row.review_items || []).forEach(item => {
+    checks[item.check_id] = { result: item.result || null, notes: item.notes || "" }
+  })
+  const client = Array.isArray(row.clients) ? row.clients[0] : row.clients
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    clientName: client?.contact_name || "",
+    company: client?.name || "Unknown company",
+    package: row.package || "Business Snapshot — $500",
+    licenseType: row.license_type || "",
+    userCount: row.user_count || "",
+    reviewerName: row.reviewer_name || "",
+    reviewDate: row.review_date || todayISODate(),
+    scope: row.scope || "",
+    notes: row.notes || "",
+    secureScoreNotes: row.secure_score_notes || "",
+    duration: row.duration_ms || 0,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+    checks,
+  }
+}
+
+async function loadReviewsFromSupabase(session) {
+  const select = "id,client_id,package,license_type,user_count,reviewer_name,review_date,scope,notes,secure_score_notes,duration_ms,created_at,completed_at,clients(id,name,contact_name),review_items(check_id,result,notes)"
+  const rows = await supabaseRequest(`/rest/v1/reviews?select=${encodeURIComponent(select)}&order=created_at.desc`, { session })
+  return (rows || []).map(reviewFromRow)
+}
+
+async function createReviewInSupabase(form, session) {
+  const clients = await supabaseRequest("/rest/v1/clients?select=id,name,contact_name", {
+    method: "POST",
+    session,
+    headers: { Prefer: "return=representation" },
+    body: { name: form.company, contact_name: form.clientName },
+  })
+  const client = clients?.[0]
+  if (!client?.id) throw new Error("Unable to create client record.")
+
+  const reviews = await supabaseRequest("/rest/v1/reviews?select=id,client_id,package,license_type,user_count,reviewer_name,review_date,scope,notes,secure_score_notes,duration_ms,created_at,completed_at", {
+    method: "POST",
+    session,
+    headers: { Prefer: "return=representation" },
+    body: {
+      client_id: client.id,
+      package: form.package,
+      license_type: form.licenseType || null,
+      user_count: form.userCount || null,
+      reviewer_name: form.reviewerName,
+      review_date: form.reviewDate || todayISODate(),
+      scope: form.scope,
+      notes: form.notes || null,
+      duration_ms: 0,
+    },
+  })
+  const review = reviews?.[0]
+  if (!review?.id) throw new Error("Unable to create review record.")
+  return reviewFromRow({ ...review, clients: client, review_items: [] })
+}
+
+async function upsertReviewItem(session, reviewId, checkId, item) {
+  await supabaseRequest("/rest/v1/review_items?on_conflict=review_id,check_id", {
+    method: "POST",
+    session,
+    headers: { Prefer: "resolution=merge-duplicates" },
+    body: {
+      review_id: reviewId,
+      check_id: checkId,
+      result: item?.result || null,
+      notes: item?.notes || null,
+    },
+  })
+}
+
+async function patchReview(session, reviewId, values) {
+  await supabaseRequest(`/rest/v1/reviews?id=eq.${encodeURIComponent(reviewId)}`, {
+    method: "PATCH",
+    session,
+    body: values,
+  })
+}
+
+async function deleteReviewFromSupabase(session, reviewId) {
+  await supabaseRequest(`/rest/v1/reviews?id=eq.${encodeURIComponent(reviewId)}`, {
+    method: "DELETE",
+    session,
+  })
+}
+
+async function loadLatestGeneratedReport(session, reviewId) {
+  const rows = await supabaseRequest(`/rest/v1/generated_reports?select=report,created_at&review_id=eq.${encodeURIComponent(reviewId)}&order=created_at.desc&limit=1`, { session })
+  return rows?.[0]?.report || null
+}
+
 // ── EXPORT BUILDER (kept for reference / future use) ───────────────────────
 function buildExport(engagement) {
   const lines = []
@@ -223,79 +440,134 @@ function buildExport(engagement) {
 export default function Checklist() {
   const [engagements, setEngagements] = useState([])
   const [loaded, setLoaded] = useState(false)
+  const [dbLoading, setDbLoading] = useState(false)
+  const [dbError, setDbError] = useState("")
+  const [session, setSession] = useState(null)
   const [view, setView] = useState("list") // list | active | new
   const [activeId, setActiveId] = useState(null)
   const [showExport, setShowExport] = useState(false)
   const [timerRunning, setTimerRunning] = useState(false)
-  const [newForm, setNewForm] = useState({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", notes: "" })
+  const [newForm, setNewForm] = useState({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
   const timerRef = useRef(null)
 
-  // Load
   useEffect(() => {
-    try { const s = localStorage.getItem(STORAGE_KEY); if (s) setEngagements(JSON.parse(s)) } catch {}
+    if (!SUPABASE_CONFIGURED) { setLoaded(true); return }
+    try {
+      const raw = localStorage.getItem(AUTH_STORAGE_KEY)
+      if (raw) {
+        const stored = JSON.parse(raw)
+        if (!stored.expires_at || stored.expires_at * 1000 > Date.now()) setSession(stored)
+        else localStorage.removeItem(AUTH_STORAGE_KEY)
+      }
+    } catch {
+      localStorage.removeItem(AUTH_STORAGE_KEY)
+    }
     setLoaded(true)
   }, [])
 
-  // Save
   useEffect(() => {
-    if (loaded) try { localStorage.setItem(STORAGE_KEY, JSON.stringify(engagements)) } catch {}
-  }, [engagements, loaded])
+    if (!loaded || !session) return
+    let cancelled = false
+    setDbLoading(true)
+    setDbError("")
+    loadReviewsFromSupabase(session)
+      .then(rows => { if (!cancelled) setEngagements(rows) })
+      .catch(e => { if (!cancelled) setDbError(e.message || "Unable to load reviews.") })
+      .finally(() => { if (!cancelled) setDbLoading(false) })
+    return () => { cancelled = true }
+  }, [loaded, session])
 
   // Timer
   useEffect(() => {
     if (timerRunning && activeId) {
       timerRef.current = setInterval(() => {
-        setEngagements(es => es.map(e => e.id === activeId
-          ? { ...e, duration: (e.duration || 0) + 1000 }
-          : e
-        ))
+        let nextDuration = null
+        setEngagements(es => es.map(e => {
+          if (e.id !== activeId) return e
+          nextDuration = (e.duration || 0) + 1000
+          return { ...e, duration: nextDuration }
+        }))
+        if (session && nextDuration && nextDuration % 10000 === 0) {
+          patchReview(session, activeId, { duration_ms: nextDuration }).catch(e => setDbError(e.message || "Unable to save timer."))
+        }
       }, 1000)
     } else {
       clearInterval(timerRef.current)
     }
     return () => clearInterval(timerRef.current)
-  }, [timerRunning, activeId])
+  }, [timerRunning, activeId, session])
 
   const active = engagements.find(e => e.id === activeId)
 
-  const createEngagement = () => {
-    if (!newForm.clientName || !newForm.company) { alert("Client name and company are required."); return }
-    const eng = {
-      id: uid(),
-      ...newForm,
-      checks: {},
-      duration: 0,
-      createdAt: new Date().toISOString(),
-      completedAt: null,
+  const handleAuthSuccess = (authSession) => {
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authSession))
+    setSession(authSession)
+  }
+
+  const signOut = async () => {
+    try {
+      if (session) await supabaseRequest("/auth/v1/logout", { method: "POST", session })
+    } catch {}
+    localStorage.removeItem(AUTH_STORAGE_KEY)
+    setSession(null)
+    setEngagements([])
+    setActiveId(null)
+    setView("list")
+    setTimerRunning(false)
+  }
+
+  const createEngagement = async () => {
+    if (!newForm.clientName || !newForm.company || !newForm.reviewerName || !newForm.reviewDate || !newForm.scope) { alert("Client name, company, reviewer name, review date, and scope are required."); return }
+    if (!session) { setDbError("Sign in before creating a review."); return }
+    setDbError("")
+    try {
+      const eng = await createReviewInSupabase(newForm, session)
+      setEngagements(es => [eng, ...es])
+      setActiveId(eng.id)
+      setView("active")
+      setTimerRunning(true)
+      setNewForm({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
+    } catch (e) {
+      setDbError(e.message || "Unable to create review.")
     }
-    setEngagements(es => [eng, ...es])
-    setActiveId(eng.id)
-    setView("active")
-    setTimerRunning(true)
-    setNewForm({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", notes: "" })
   }
 
   const setCheckResult = (checkId, result) => {
+    const current = engagements.find(e => e.id === activeId)?.checks?.[checkId] || {}
+    const nextItem = { ...current, result }
     setEngagements(es => es.map(e => e.id === activeId
-      ? { ...e, checks: { ...e.checks, [checkId]: { ...e.checks?.[checkId], result } } }
+      ? { ...e, checks: { ...e.checks, [checkId]: nextItem } }
       : e
     ))
+    if (session && activeId) upsertReviewItem(session, activeId, checkId, nextItem).catch(e => setDbError(e.message || "Unable to save checklist item."))
   }
 
   const setCheckNotes = (checkId, notes) => {
+    const current = engagements.find(e => e.id === activeId)?.checks?.[checkId] || {}
+    const nextItem = { ...current, notes }
     setEngagements(es => es.map(e => e.id === activeId
-      ? { ...e, checks: { ...e.checks, [checkId]: { ...e.checks?.[checkId], notes } } }
+      ? { ...e, checks: { ...e.checks, [checkId]: nextItem } }
       : e
     ))
+    if (session && activeId) upsertReviewItem(session, activeId, checkId, nextItem).catch(e => setDbError(e.message || "Unable to save checklist note."))
   }
 
   const updateEngagementField = (field, val) => {
+    const columnMap = { reviewerName: "reviewer_name", reviewDate: "review_date", scope: "scope", secureScoreNotes: "secure_score_notes", duration: "duration_ms" }
     setEngagements(es => es.map(e => e.id === activeId ? { ...e, [field]: val } : e))
+    const column = columnMap[field]
+    if (session && activeId && column) patchReview(session, activeId, { [column]: val }).catch(e => setDbError(e.message || "Unable to save review field."))
   }
 
-  const deleteEngagement = (id) => {
-    setEngagements(es => es.filter(e => e.id !== id))
-    if (activeId === id) { setActiveId(null); setView("list") }
+  const deleteEngagement = async (id) => {
+    if (!session) return
+    try {
+      await deleteReviewFromSupabase(session, id)
+      setEngagements(es => es.filter(e => e.id !== id))
+      if (activeId === id) { setActiveId(null); setView("list") }
+    } catch (e) {
+      setDbError(e.message || "Unable to delete review.")
+    }
   }
 
   if (!loaded) return (
@@ -303,6 +575,10 @@ export default function Checklist() {
       <p className="text-[13px] font-mono text-[#3d5a7a] animate-pulse">Loading checklists…</p>
     </div>
   )
+
+  if (!SUPABASE_CONFIGURED) return <MissingSupabaseConfig />
+
+  if (!session) return <LoginView onAuth={handleAuthSuccess} />
 
   return (
     <div className="min-h-screen bg-[#080d14] text-[#e8f0fe]"
@@ -339,6 +615,10 @@ export default function Checklist() {
           )}
 
           <div className="flex items-center gap-2">
+            <button onClick={signOut}
+              className="text-[11px] font-mono text-[#7a9abf] border border-[#1a2d45] px-3 py-2 rounded-lg hover:text-[#e8f0fe] hover:border-[#1e3a5f] transition-colors">
+              Sign out
+            </button>
             {view === "active" && (
               <>
                 <button onClick={() => { setShowExport(true); setTimerRunning(false) }}
@@ -368,6 +648,16 @@ export default function Checklist() {
       </div>
 
       <div className="max-w-4xl mx-auto px-5 py-6">
+        {dbError && (
+          <div className="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl p-3 text-[12px] text-red-300">
+            {dbError}
+          </div>
+        )}
+        {dbLoading && (
+          <div className="mb-4 bg-[#0d1520] border border-[#1a2d45] rounded-xl p-3 text-[12px] text-[#7a9abf]">
+            Loading secure review history…
+          </div>
+        )}
 
         {/* ── NEW REVIEW FORM ── */}
         {view === "new" && (
@@ -399,9 +689,96 @@ export default function Checklist() {
       {showExport && active && (
         <ExportModal
           engagement={active}
+          session={session}
           onClose={() => setShowExport(false)}
         />
       )}
+    </div>
+  )
+}
+
+
+function MissingSupabaseConfig() {
+  return (
+    <div className="min-h-screen bg-[#080d14] text-[#e8f0fe] flex items-center justify-center px-5">
+      <div className="max-w-lg bg-[#0d1520] border border-amber-500/30 rounded-xl p-6">
+        <p className="text-[11px] font-mono text-amber-300 uppercase tracking-wider mb-2">Supabase configuration required</p>
+        <h1 className="text-[20px] font-semibold mb-2">Secure review storage is not configured yet.</h1>
+        <p className="text-[13px] text-[#7a9abf] leading-relaxed mb-4">
+          Phase 2A requires Supabase Auth and RLS-backed persistence before reviews can be created or viewed.
+          Add the public Supabase URL and anon key to your environment, then apply the SQL migration in <span className="font-mono text-[#e8f0fe]">supabase/migrations/001_initial_schema.sql</span>.
+        </p>
+        <div className="bg-[#080d14] border border-[#1a2d45] rounded-lg p-3 text-[12px] font-mono text-[#e8f0fe] space-y-1">
+          <p>NEXT_PUBLIC_SUPABASE_URL=...</p>
+          <p>NEXT_PUBLIC_SUPABASE_ANON_KEY=...</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LoginView({ onAuth }) {
+  const [mode, setMode] = useState("signin")
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [fullName, setFullName] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState("")
+  const [message, setMessage] = useState("")
+
+  async function submit(e) {
+    e.preventDefault()
+    setBusy(true)
+    setError("")
+    setMessage("")
+    try {
+      const data = mode === "signup"
+        ? await authRequest("/auth/v1/signup", { email, password, data: { full_name: fullName } })
+        : await authRequest("/auth/v1/token?grant_type=password", { email, password })
+      if (data.access_token) onAuth(data)
+      else setMessage("Check your email to confirm the account, then sign in.")
+    } catch (e) {
+      setError(e.message || "Authentication failed.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-[#080d14] text-[#e8f0fe] flex items-center justify-center px-5">
+      <form onSubmit={submit} className="w-full max-w-sm bg-[#0d1520] border border-[#1a2d45] rounded-xl p-6 space-y-4">
+        <div>
+          <p className="text-[11px] font-mono text-[#60a5fa] uppercase tracking-wider mb-1">Amazin Cyber</p>
+          <h1 className="text-[20px] font-semibold">{mode === "signup" ? "Create operator account" : "Sign in"}</h1>
+          <p className="text-[12px] text-[#7a9abf] mt-1">Authenticated Supabase storage is required for client reviews.</p>
+        </div>
+        {mode === "signup" && (
+          <div>
+            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Name</label>
+            <input value={fullName} onChange={e => setFullName(e.target.value)}
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6]" />
+          </div>
+        )}
+        <div>
+          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Email</label>
+          <input type="email" value={email} onChange={e => setEmail(e.target.value)} required
+            className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6]" />
+        </div>
+        <div>
+          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Password</label>
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={6}
+            className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6]" />
+        </div>
+        {error && <p className="text-[12px] text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg p-2">{error}</p>}
+        {message && <p className="text-[12px] text-green-300 bg-green-500/10 border border-green-500/30 rounded-lg p-2">{message}</p>}
+        <button disabled={busy} className="w-full text-[14px] font-mono text-white bg-[#3b82f6] py-2.5 rounded-lg hover:bg-[#2563eb] disabled:opacity-60 transition-colors">
+          {busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}
+        </button>
+        <button type="button" onClick={() => setMode(mode === "signup" ? "signin" : "signup")}
+          className="w-full text-[12px] text-[#7a9abf] hover:text-[#e8f0fe] transition-colors">
+          {mode === "signup" ? "Already have an account? Sign in" : "Need an account? Create one"}
+        </button>
+      </form>
     </div>
   )
 }
@@ -455,6 +832,25 @@ function NewReviewForm({ form, setForm, onCreate }) {
               placeholder="e.g. 12"
               className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
           </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Reviewer Name *</label>
+            <input value={form.reviewerName} onChange={e => set("reviewerName", e.target.value)}
+              placeholder="Oshé"
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Date *</label>
+            <input type="date" value={form.reviewDate} onChange={e => set("reviewDate", e.target.value)}
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
+          </div>
+        </div>
+        <div>
+          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Scope *</label>
+          <textarea value={form.scope} onChange={e => set("scope", e.target.value)} rows={3}
+            placeholder="Example: Microsoft 365 tenant security settings reviewed through Entra ID, Exchange admin center, Defender, SharePoint, and Secure Score."
+            className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors resize-none" />
         </div>
         <div>
           <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Pre-Review Notes</label>
@@ -536,6 +932,7 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
   const { pass, fail } = calcScore(engagement.checks)
   const totalChecks = SECTIONS.reduce((n, s) => n + s.checks.length, 0)
   const doneChecks = Object.values(engagement.checks || {}).filter(v => v.result).length
+  const qualityIssues = getReportQualityIssues(engagement)
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -562,6 +959,43 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
         <div className="mt-3 h-1.5 bg-[#1a2d45] rounded-full overflow-hidden">
           <div className="h-full bg-gradient-to-r from-[#3b82f6] to-[#60a5fa] rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
         </div>
+      </div>
+
+      {/* Report quality gate */}
+      <div className={`border rounded-xl p-4 mb-5 ${qualityIssues.length ? "bg-amber-500/10 border-amber-500/30" : "bg-green-500/10 border-green-500/30"}`}>
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <p className={`text-[12px] font-semibold ${qualityIssues.length ? "text-amber-300" : "text-green-300"}`}>Report Quality Gate</p>
+            <p className="text-[11px] text-[#7a9abf]">Client reports require scope, reviewer, date, and minimum completion before generation.</p>
+          </div>
+          <span className={`text-[10px] font-mono px-2 py-1 rounded border ${qualityIssues.length ? "text-amber-300 border-amber-500/30" : "text-green-300 border-green-500/30"}`}>
+            {qualityIssues.length ? `${qualityIssues.length} blocker${qualityIssues.length === 1 ? "" : "s"}` : "Ready"}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+          <div>
+            <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Reviewer Name *</label>
+            <input value={engagement.reviewerName || ""} onChange={e => onUpdateField("reviewerName", e.target.value)}
+              placeholder="Reviewer name"
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
+          </div>
+          <div>
+            <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Date *</label>
+            <input type="date" value={engagement.reviewDate || ""} onChange={e => onUpdateField("reviewDate", e.target.value)}
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6] transition-colors" />
+          </div>
+        </div>
+        <div>
+          <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Scope *</label>
+          <textarea value={engagement.scope || ""} onChange={e => onUpdateField("scope", e.target.value)} rows={3}
+            placeholder="Describe the tenant, tools, and M365 areas reviewed."
+            className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors resize-none" />
+        </div>
+        {qualityIssues.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {qualityIssues.map(issue => <li key={issue} className="text-[11px] text-amber-200">• {issue}</li>)}
+          </ul>
+        )}
       </div>
 
       {/* Sections */}
@@ -673,10 +1107,11 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
 }
 
 // ── REPORT MODAL ───────────────────────────────────────────────────────────
-function ExportModal({ engagement, onClose }) {
+function ExportModal({ engagement, session, onClose }) {
   const [stage, setStage] = useState("ready") // ready | generating | done | error
   const [report, setReport] = useState(null)
   const [errorMsg, setErrorMsg] = useState("")
+  const [proposalStatus, setProposalStatus] = useState("")
 
   const { pass, fail } = calcScore(engagement.checks)
   const total = pass + fail
@@ -684,86 +1119,48 @@ function ExportModal({ engagement, onClose }) {
   const grade = calcGrade(engagement.checks)
   const gradeSuffix = grade ? (grade.plus ? "+" : grade.minus ? "−" : "") : ""
   const gradeLabel = grade ? `${grade.grade}${gradeSuffix}` : null
+  const qualityIssues = getReportQualityIssues(engagement)
+  const canGenerateReport = qualityIssues.length === 0
+
+  useEffect(() => {
+    let cancelled = false
+    if (!session || !engagement?.id) return
+    loadLatestGeneratedReport(session, engagement.id)
+      .then(savedReport => {
+        if (!cancelled && savedReport) {
+          setReport(savedReport)
+          setStage("done")
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [session, engagement?.id])
 
   async function generateReport() {
+    if (!canGenerateReport) {
+      setErrorMsg(`Report is not ready: ${qualityIssues.join(" ")}`)
+      setStage("error")
+      return
+    }
+
     setStage("generating")
     setErrorMsg("")
-
-    const failLines = []
-    const passLines = []
-    SECTIONS.forEach(section => {
-      section.checks.forEach(check => {
-        const r = engagement.checks?.[check.id]
-        const sev = SEVERITY_META[check.severity]?.label || check.severity
-        const notes = r?.notes ? ` (Notes: ${r.notes})` : ""
-        if (r?.result === "fail") failLines.push(`[${sev}] ${check.label}${notes}`)
-        if (r?.result === "pass") passLines.push(`[${sev}] ${check.label}`)
-      })
-    })
-
-    const prompt = `You are writing a Microsoft 365 Security Snapshot report for a small business owner. The audience is non-technical.
-
-CLIENT: ${engagement.company}${engagement.clientName ? ` (${engagement.clientName})` : ""}
-PACKAGE: ${engagement.package || "Business Snapshot"}
-REVIEW DATE: ${formatDate(engagement.createdAt)}
-SCORE: ${pass} pass / ${fail} fail out of ${total} checks (${pct}%)
-SECURITY GRADE: ${gradeLabel || "Not calculated"}
-${engagement.licenseType ? `LICENSE: ${engagement.licenseType}` : ""}
-${engagement.userCount ? `USERS: ${engagement.userCount}` : ""}
-${engagement.secureScoreNotes ? `SECURE SCORE NOTES: ${engagement.secureScoreNotes}` : ""}
-
-FAILED CHECKS (needs attention):
-${failLines.join("\n") || "None"}
-
-PASSING CHECKS (working well):
-${passLines.join("\n") || "None"}
-
-Respond with ONLY a valid JSON object (no markdown, no backticks):
-{
-  "executiveSummary": "2-3 sentences. Lead with what is working. Name the most critical risks plainly. End with the priority action. Define any technical term on first use.",
-  "findings": [
-    {
-      "severity": "Critical|High|Medium",
-      "title": "Short plain-English title — rewrite the checklist item, do not copy it verbatim",
-      "explanation": "2-3 sentences. What this setting is, what could go wrong if it is not fixed, and why it matters to this specific business. No jargon. If a technical term is unavoidable, define it in parentheses."
-    }
-  ],
-  "priorityActions": {
-    "immediate": ["Action the business can take this week — plain English, specific, actionable. No jargon."],
-    "thirtyDays": ["Action to complete within 30 days — slightly more involved but still practical."],
-    "future": ["Longer-term improvement — may require additional licensing or planning."]
-  },
-  "passItems": ["Short plain-English phrase describing what is working — rewrite, do not copy verbatim"]
-}
-
-Rules:
-- findings = only FAILED checks, sorted Critical → High → Medium
-- priorityActions.immediate = Critical and High findings that can be fixed this week (max 4 items)
-- priorityActions.thirtyDays = High and Medium findings requiring more planning (max 4 items)
-- priorityActions.future = Medium findings or improvements requiring licensing/infrastructure changes (max 3 items)
-- passItems = only PASSING checks
-- Tone: calm, honest, reassuring. Never alarming or dismissive.
-- Every action must be specific enough to act on — never write "improve security" or "review settings". Write "Enable MFA for the 8 accounts that currently don't have it."`
 
     try {
       const res = await fetch("/api/generate-report", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-5",
-          max_tokens: 2500,
-          messages: [{ role: "user", content: prompt }]
-        })
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session?.access_token || ""}`,
+        },
+        body: JSON.stringify({ reviewId: engagement.id })
       })
       const data = await res.json()
       if (!res.ok) {
         const msg = data?.error || `Error ${res.status}`
         throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg))
       }
-      const text = (data.content || []).map(b => b.text || "").join("")
-      const clean = text.replace(/```json|```/g, "").trim()
-      const parsed = JSON.parse(clean)
-      setReport(parsed)
+      setReport(data.report)
       setStage("done")
     } catch (e) {
       setErrorMsg(e.message || "Something went wrong. Try again.")
@@ -854,10 +1251,18 @@ Rules:
             <>
               <div className="bg-[#111d2e] border border-[#1a2d45] rounded-xl p-4 mb-5">
                 <p className="text-[12px] font-semibold text-[#e8f0fe] mb-1">What happens next</p>
-                <p className="text-[12px] text-[#7a9abf] leading-relaxed">Claude will read your findings and write a plain-English report — executive summary, prioritized findings with explanations, and what's working well. Ready to print or send in under 30 seconds.</p>
+                <p className="text-[12px] text-[#7a9abf] leading-relaxed">The server will validate your structured checklist data, apply locked report instructions, and write a plain-English report — executive summary, prioritized findings with explanations, and what's working well.</p>
               </div>
-              <button onClick={generateReport}
-                className="w-full text-[14px] font-mono text-white bg-[#3b82f6] py-3 rounded-xl hover:bg-[#2563eb] transition-colors">
+              {!canGenerateReport && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 mb-4">
+                  <p className="text-[12px] font-semibold text-amber-300 mb-2">Report blocked until quality gates are complete</p>
+                  <ul className="space-y-1">
+                    {qualityIssues.map(issue => <li key={issue} className="text-[11px] text-amber-200">• {issue}</li>)}
+                  </ul>
+                </div>
+              )}
+              <button onClick={generateReport} disabled={!canGenerateReport}
+                className={`w-full text-[14px] font-mono text-white py-3 rounded-xl transition-colors ${canGenerateReport ? "bg-[#3b82f6] hover:bg-[#2563eb]" : "bg-[#1a2d45] cursor-not-allowed opacity-60"}`}>
                 Generate Plain-English Report →
               </button>
             </>
@@ -893,33 +1298,27 @@ Rules:
                   className="flex-1 text-[12px] font-mono text-white bg-green-600 py-2 rounded-lg hover:bg-green-700 transition-colors">
                   Print / Save PDF
                 </button>
-                <button onClick={() => {
-                  const fails = []
-                  SECTIONS.forEach(s => s.checks.forEach(c => {
-                    if (engagement.checks?.[c.id]?.result === "fail") fails.push(c.label)
-                  }))
-                  const params = new URLSearchParams({
-                    company: engagement.company || "",
-                    clientName: engagement.clientName || "",
-                    package: "Remediation Support — $1,000+",
-                    licenseType: engagement.licenseType || "",
-                    userCount: engagement.userCount || "",
-                    concerns: fails.slice(0, 5).join("; "),
-                    callNotes: `Security Snapshot completed ${formatDate(engagement.createdAt)}. Score: ${pass} pass / ${fail} fail (${pct}%). Key findings: ${fails.slice(0, 3).join(", ")}.`,
-                    urgency: fail >= 3 ? "Recent security incident" : "Standard",
-                    riskLevel: fail >= 5 ? "High" : fail >= 2 ? "Medium" : "Low",
-                    autoGenerate: "true",
-                  })
-                  window.open(`https://proposals.amazincyber.com?${params.toString()}`, "_blank")
+                <button onClick={async () => {
+                  const summary = buildProposalSummary(engagement, pass, fail, pct)
+                  try {
+                    await navigator.clipboard?.writeText(summary)
+                    setProposalStatus("Opened the proposal tool with a clean URL. A remediation summary was copied for manual paste.")
+                  } catch {
+                    setProposalStatus("Opened the proposal tool with a clean URL. Copy findings manually from this report.")
+                  }
+                  window.open("https://proposals.amazincyber.com", "_blank", "noopener,noreferrer")
                 }}
                   className="flex-1 text-[12px] font-mono text-white bg-purple-600 py-2 rounded-lg hover:bg-purple-700 transition-colors">
-                  Generate Remediation Proposal →
+                  Open Proposal Tool →
                 </button>
                 <button onClick={() => setStage("ready")}
                   className="text-[12px] font-mono text-[#7a9abf] border border-[#1a2d45] px-4 py-2 rounded-lg hover:text-[#e8f0fe] hover:border-[#1e3a5f] transition-colors">
                   Regenerate
                 </button>
               </div>
+              {proposalStatus && (
+                <p className="text-[11px] text-purple-200 bg-purple-500/10 border border-purple-500/30 rounded-lg px-3 py-2 mb-4">{proposalStatus}</p>
+              )}
 
               {/* White report card */}
               <div id="ac-report-print-target" style={{
@@ -933,7 +1332,7 @@ Rules:
                   <div style={{ fontSize: 12, color: "#6b7280", display: "flex", gap: 20, flexWrap: "wrap", marginTop: 6 }}>
                     <span>Prepared for: <strong style={{ color: "#374151" }}>{engagement.clientName ? `${engagement.clientName}, ` : ""}{engagement.company}</strong></span>
                     <span>Package: <strong style={{ color: "#374151" }}>{engagement.package}</strong></span>
-                    <span>Reviewed: <strong style={{ color: "#374151" }}>{formatDate(engagement.createdAt)}</strong></span>
+                    <span>Reviewed: <strong style={{ color: "#374151" }}>{formatDate(engagement.reviewDate || engagement.createdAt)}</strong></span>
                     {engagement.duration > 0 && <span>Duration: <strong style={{ color: "#374151" }}>{formatDuration(engagement.duration)}</strong></span>}
                   </div>
                 </div>
@@ -966,6 +1365,11 @@ Rules:
                 <div style={{ background: "#fef9f2", borderLeft: "3px solid #d97706", borderRadius: "0 8px 8px 0", padding: "12px 16px", marginBottom: 22 }}>
                   <p style={{ fontFamily: "monospace", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: "#d97706", marginBottom: 8 }}>Executive Summary</p>
                   <p style={{ fontSize: 14, color: "#374151", lineHeight: 1.7, margin: 0 }}>{report.executiveSummary}</p>
+                </div>
+
+                <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: "10px 12px", marginBottom: 20 }}>
+                  <p style={{ fontFamily: "monospace", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: "#6b7280", marginBottom: 6 }}>Scope + Limitations</p>
+                  <p style={{ fontSize: 12, color: "#4b5563", lineHeight: 1.6, margin: 0 }}>{report.scopeAndLimitations || engagement.scope}</p>
                 </div>
 
                 {/* Findings */}
@@ -1033,7 +1437,7 @@ Rules:
 
                 {/* Footer */}
                 <div style={{ marginTop: 24, paddingTop: 14, borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", fontSize: 11, color: "#9ca3af", flexWrap: "wrap", gap: 4 }}>
-                  <span>Prepared by Oshé · Amazin Cyber Solutions · amazincyber.com</span>
+                  <span>Prepared by {engagement.reviewerName || "Amazin Cyber"} · Amazin Cyber Solutions · amazincyber.com</span>
                   <span>Confidential — for {engagement.company} only</span>
                 </div>
               </div>
