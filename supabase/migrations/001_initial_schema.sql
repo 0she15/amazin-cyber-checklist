@@ -179,7 +179,13 @@ create policy "generated_reports_delete_own" on public.generated_reports
 create policy "audit_events_select_own" on public.audit_events
   for select to authenticated using (user_id = auth.uid());
 create policy "audit_events_insert_own" on public.audit_events
-  for insert to authenticated with check (user_id = auth.uid());
+  for insert to authenticated with check (
+    user_id = auth.uid()
+    and (
+      review_id is null
+      or exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+    )
+  );
 
 create index if not exists clients_user_id_created_at_idx on public.clients(user_id, created_at desc);
 create index if not exists reviews_user_id_created_at_idx on public.reviews(user_id, created_at desc);
