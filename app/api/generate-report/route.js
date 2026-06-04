@@ -4,6 +4,8 @@ const MAX_BODY_BYTES = 25_000
 const RATE_LIMIT_WINDOW_MS = 60_000
 const RATE_LIMIT_MAX_REQUESTS = 5
 const requestLog = new Map()
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
 
 const VALID_SEVERITIES = new Set(["Critical", "High", "Medium"])
 const SEVERITY_LABELS = { critical: "Critical", high: "High", medium: "Medium" }
@@ -76,6 +78,116 @@ function checkRateLimit(ip) {
   recent.push(now)
   requestLog.set(ip, recent)
   return true
+}
+
+async function supabaseServerRequest(path, { method = "GET", token, body, headers = {} } = {}) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error("Supabase environment variables are not configured")
+  const res = await fetch(`${SUPABASE_URL}${path}`, {
+    method,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const text = await res.text()
+  const data = text ? JSON.parse(text) : null
+  if (!res.ok) throw new Error(data?.message || data?.error_description || data?.error || `Supabase error ${res.status}`)
+  return data
+}
+
+function getBearerToken(request) {
+  const header = request.headers.get("authorization") || ""
+  const [scheme, token] = header.split(" ")
+  return scheme?.toLowerCase() === "bearer" ? token : ""
+}
+
+async function getAuthenticatedUser(token) {
+  if (!token) throw new Error("Authentication required")
+  const user = await supabaseServerRequest("/auth/v1/user", { token })
+  if (!user?.id) throw new Error("Authentication required")
+  return user
+}
+
+async function loadReviewPayloadFromSupabase(reviewId, token, userId) {
+  const reviewSelect = "id,client_id,package,license_type,user_count,reviewer_name,review_date,scope,notes,secure_score_notes,duration_ms,created_at,completed_at"
+  const reviews = await supabaseServerRequest(`/rest/v1/reviews?select=${encodeURIComponent(reviewSelect)}&id=eq.${encodeURIComponent(reviewId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`, { token })
+  const review = reviews?.[0]
+  if (!review) throw new Error("Review not found or access denied")
+
+  const clientSelect = "id,name,contact_name"
+  const clients = await supabaseServerRequest(`/rest/v1/clients?select=${encodeURIComponent(clientSelect)}&id=eq.${encodeURIComponent(review.client_id)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`, { token })
+  const client = clients?.[0]
+  if (!client) throw new Error("Client not found or access denied")
+
+  const itemSelect = "check_id,result,notes"
+  const rows = await supabaseServerRequest(`/rest/v1/review_items?select=${encodeURIComponent(itemSelect)}&review_id=eq.${encodeURIComponent(review.id)}&user_id=eq.${encodeURIComponent(userId)}`, { token })
+  const seenIds = new Set()
+  const failed = []
+  const passing = []
+  const notApplicable = []
+
+  ;(rows || []).forEach(row => {
+    const cleaned = cleanCheck({ id: row.check_id, notes: row.notes }, seenIds)
+    if (!cleaned) return
+    if (row.result === "fail") failed.push(cleaned)
+    if (row.result === "pass") passing.push(cleaned)
+    if (row.result === "na") notApplicable.push(cleaned)
+  })
+
+  const completed = failed.length + passing.length + notApplicable.length
+  const completionPct = Math.round((completed / CHECKLIST_TOTAL) * 100)
+  if (completionPct < 60) throw new Error("At least 60% of recognized checklist items must be completed before generating a report.")
+  if (completed < 20) throw new Error("Complete at least 20 recognized checklist items before generating a client report.")
+  if (!review.reviewer_name) throw new Error("Reviewer name is required before generating a report.")
+  if (!review.review_date) throw new Error("Review date is required before generating a report.")
+  if (!review.scope) throw new Error("Review scope is required before generating a report.")
+
+  const pass = passing.length
+  const fail = failed.length
+  const total = pass + fail
+  const pct = total ? Math.round((pass / total) * 100) : 0
+
+  return {
+    client: {
+      company: cleanString(client.name, 120),
+      clientName: cleanString(client.contact_name, 120),
+      package: cleanString(review.package, 120) || "Business Snapshot",
+      licenseType: cleanString(review.license_type, 120),
+      userCount: cleanString(review.user_count, 40),
+      reviewerName: cleanString(review.reviewer_name, 120),
+      scope: cleanString(review.scope, 1000),
+      reviewDate: cleanString(review.review_date, 40),
+      secureScoreNotes: cleanString(review.secure_score_notes, 1200),
+    },
+    score: {
+      pass,
+      fail,
+      total,
+      pct,
+      grade: calculateGrade(passing, failed),
+      completionPct,
+      completedCount: completed,
+      totalChecks: CHECKLIST_TOTAL,
+    },
+    checks: { failed, passing, notApplicable },
+    reviewId: review.id,
+  }
+}
+
+async function saveGeneratedReport(token, userId, payload, report) {
+  await supabaseServerRequest("/rest/v1/generated_reports", {
+    method: "POST",
+    token,
+    body: {
+      review_id: payload.reviewId,
+      user_id: userId,
+      report,
+      score: payload.score,
+    },
+  })
 }
 
 function cleanString(value, maxLength = 500) {
@@ -296,6 +408,9 @@ export async function POST(request) {
   if (!apiKey) {
     return Response.json({ error: "API key not configured" }, { status: 500 })
   }
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return Response.json({ error: "Supabase environment variables are not configured" }, { status: 500 })
+  }
 
   const contentLength = Number(request.headers.get("content-length") || 0)
   if (contentLength > MAX_BODY_BYTES) {
@@ -314,9 +429,19 @@ export async function POST(request) {
     return Response.json({ error: "Invalid request body" }, { status: 400 })
   }
 
-  const validation = validatePayload(body)
-  if (validation.error) {
-    return Response.json({ error: validation.error }, { status: 400 })
+  const reviewId = cleanString(body?.reviewId, 80)
+  if (!reviewId) {
+    return Response.json({ error: "Review ID is required" }, { status: 400 })
+  }
+
+  const token = getBearerToken(request)
+  let user
+  let payload
+  try {
+    user = await getAuthenticatedUser(token)
+    payload = await loadReviewPayloadFromSupabase(reviewId, token, user.id)
+  } catch (e) {
+    return Response.json({ error: e.message || "Unauthorized" }, { status: e.message?.includes("required") ? 401 : 403 })
   }
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -326,7 +451,7 @@ export async function POST(request) {
       "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify(buildAnthropicRequest(validation.value)),
+    body: JSON.stringify(buildAnthropicRequest(payload)),
   })
 
   const data = await res.json()
@@ -335,13 +460,21 @@ export async function POST(request) {
     return Response.json({ error: data?.error?.message || "Anthropic API error" }, { status: res.status })
   }
 
+  let report
   try {
     const text = (data.content || []).map(block => block.text || "").join("")
     const clean = text.replace(/```json|```/g, "").trim()
-    const report = JSON.parse(clean)
+    report = JSON.parse(clean)
     if (!validateReportShape(report)) throw new Error("Report response did not match the expected shape")
-    return Response.json({ report })
   } catch {
     return Response.json({ error: "The report service returned an invalid report. Please try again." }, { status: 502 })
   }
+
+  try {
+    await saveGeneratedReport(token, user.id, payload, report)
+  } catch {
+    return Response.json({ error: "Report generated, but could not be saved to Supabase. Please try again." }, { status: 500 })
+  }
+
+  return Response.json({ report })
 }

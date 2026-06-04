@@ -2,6 +2,49 @@
 import { useState, useEffect, useRef } from "react"
 
 const STORAGE_KEY = "amazin_checklists"
+const AUTH_STORAGE_KEY = "amazin_supabase_session"
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
+const SUPABASE_CONFIGURED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
+
+function supabaseHeaders(session, extra = {}) {
+  return {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${session?.access_token || SUPABASE_ANON_KEY}`,
+    ...extra,
+  }
+}
+
+async function supabaseRequest(path, { method = "GET", body, session, headers = {} } = {}) {
+  if (!SUPABASE_CONFIGURED) throw new Error("Supabase environment variables are not configured.")
+  const res = await fetch(`${SUPABASE_URL}${path}`, {
+    method,
+    headers: supabaseHeaders(session, {
+      "Content-Type": "application/json",
+      ...headers,
+    }),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const text = await res.text()
+  const data = text ? JSON.parse(text) : null
+  if (!res.ok) throw new Error(data?.message || data?.error_description || data?.error || `Supabase error ${res.status}`)
+  return data
+}
+
+async function authRequest(path, body) {
+  if (!SUPABASE_CONFIGURED) throw new Error("Supabase environment variables are not configured.")
+  const res = await fetch(`${SUPABASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `Auth error ${res.status}`)
+  return data
+}
 
 // ── CHECKLIST DATA ─────────────────────────────────────────────────────────
 const SECTIONS = [
@@ -267,6 +310,98 @@ function buildProposalSummary(engagement, pass, fail, pct) {
   ].join("\n")
 }
 
+function reviewFromRow(row) {
+  const checks = {}
+  ;(row.review_items || []).forEach(item => {
+    checks[item.check_id] = { result: item.result || null, notes: item.notes || "" }
+  })
+  const client = Array.isArray(row.clients) ? row.clients[0] : row.clients
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    clientName: client?.contact_name || "",
+    company: client?.name || "Unknown company",
+    package: row.package || "Business Snapshot — $500",
+    licenseType: row.license_type || "",
+    userCount: row.user_count || "",
+    reviewerName: row.reviewer_name || "",
+    reviewDate: row.review_date || todayISODate(),
+    scope: row.scope || "",
+    notes: row.notes || "",
+    secureScoreNotes: row.secure_score_notes || "",
+    duration: row.duration_ms || 0,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+    checks,
+  }
+}
+
+async function loadReviewsFromSupabase(session) {
+  const select = "id,client_id,package,license_type,user_count,reviewer_name,review_date,scope,notes,secure_score_notes,duration_ms,created_at,completed_at,clients(id,name,contact_name),review_items(check_id,result,notes)"
+  const rows = await supabaseRequest(`/rest/v1/reviews?select=${encodeURIComponent(select)}&order=created_at.desc`, { session })
+  return (rows || []).map(reviewFromRow)
+}
+
+async function createReviewInSupabase(form, session) {
+  const clients = await supabaseRequest("/rest/v1/clients?select=id,name,contact_name", {
+    method: "POST",
+    session,
+    headers: { Prefer: "return=representation" },
+    body: { name: form.company, contact_name: form.clientName },
+  })
+  const client = clients?.[0]
+  if (!client?.id) throw new Error("Unable to create client record.")
+
+  const reviews = await supabaseRequest("/rest/v1/reviews?select=id,client_id,package,license_type,user_count,reviewer_name,review_date,scope,notes,secure_score_notes,duration_ms,created_at,completed_at", {
+    method: "POST",
+    session,
+    headers: { Prefer: "return=representation" },
+    body: {
+      client_id: client.id,
+      package: form.package,
+      license_type: form.licenseType || null,
+      user_count: form.userCount || null,
+      reviewer_name: form.reviewerName,
+      review_date: form.reviewDate || todayISODate(),
+      scope: form.scope,
+      notes: form.notes || null,
+      duration_ms: 0,
+    },
+  })
+  const review = reviews?.[0]
+  if (!review?.id) throw new Error("Unable to create review record.")
+  return reviewFromRow({ ...review, clients: client, review_items: [] })
+}
+
+async function upsertReviewItem(session, reviewId, checkId, item) {
+  await supabaseRequest("/rest/v1/review_items?on_conflict=review_id,check_id", {
+    method: "POST",
+    session,
+    headers: { Prefer: "resolution=merge-duplicates" },
+    body: {
+      review_id: reviewId,
+      check_id: checkId,
+      result: item?.result || null,
+      notes: item?.notes || null,
+    },
+  })
+}
+
+async function patchReview(session, reviewId, values) {
+  await supabaseRequest(`/rest/v1/reviews?id=eq.${encodeURIComponent(reviewId)}`, {
+    method: "PATCH",
+    session,
+    body: values,
+  })
+}
+
+async function deleteReviewFromSupabase(session, reviewId) {
+  await supabaseRequest(`/rest/v1/reviews?id=eq.${encodeURIComponent(reviewId)}`, {
+    method: "DELETE",
+    session,
+  })
+}
+
 // ── EXPORT BUILDER (kept for reference / future use) ───────────────────────
 function buildExport(engagement) {
   const lines = []
@@ -300,6 +435,9 @@ function buildExport(engagement) {
 export default function Checklist() {
   const [engagements, setEngagements] = useState([])
   const [loaded, setLoaded] = useState(false)
+  const [dbLoading, setDbLoading] = useState(false)
+  const [dbError, setDbError] = useState("")
+  const [session, setSession] = useState(null)
   const [view, setView] = useState("list") // list | active | new
   const [activeId, setActiveId] = useState(null)
   const [showExport, setShowExport] = useState(false)
@@ -307,73 +445,124 @@ export default function Checklist() {
   const [newForm, setNewForm] = useState({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
   const timerRef = useRef(null)
 
-  // Load
   useEffect(() => {
-    try { const s = localStorage.getItem(STORAGE_KEY); if (s) setEngagements(JSON.parse(s)) } catch {}
+    if (!SUPABASE_CONFIGURED) { setLoaded(true); return }
+    try {
+      const raw = localStorage.getItem(AUTH_STORAGE_KEY)
+      if (raw) {
+        const stored = JSON.parse(raw)
+        if (!stored.expires_at || stored.expires_at * 1000 > Date.now()) setSession(stored)
+        else localStorage.removeItem(AUTH_STORAGE_KEY)
+      }
+    } catch {
+      localStorage.removeItem(AUTH_STORAGE_KEY)
+    }
     setLoaded(true)
   }, [])
 
-  // Save
   useEffect(() => {
-    if (loaded) try { localStorage.setItem(STORAGE_KEY, JSON.stringify(engagements)) } catch {}
-  }, [engagements, loaded])
+    if (!loaded || !session) return
+    let cancelled = false
+    setDbLoading(true)
+    setDbError("")
+    loadReviewsFromSupabase(session)
+      .then(rows => { if (!cancelled) setEngagements(rows) })
+      .catch(e => { if (!cancelled) setDbError(e.message || "Unable to load reviews.") })
+      .finally(() => { if (!cancelled) setDbLoading(false) })
+    return () => { cancelled = true }
+  }, [loaded, session])
 
   // Timer
   useEffect(() => {
     if (timerRunning && activeId) {
       timerRef.current = setInterval(() => {
-        setEngagements(es => es.map(e => e.id === activeId
-          ? { ...e, duration: (e.duration || 0) + 1000 }
-          : e
-        ))
+        let nextDuration = null
+        setEngagements(es => es.map(e => {
+          if (e.id !== activeId) return e
+          nextDuration = (e.duration || 0) + 1000
+          return { ...e, duration: nextDuration }
+        }))
+        if (session && nextDuration && nextDuration % 10000 === 0) {
+          patchReview(session, activeId, { duration_ms: nextDuration }).catch(e => setDbError(e.message || "Unable to save timer."))
+        }
       }, 1000)
     } else {
       clearInterval(timerRef.current)
     }
     return () => clearInterval(timerRef.current)
-  }, [timerRunning, activeId])
+  }, [timerRunning, activeId, session])
 
   const active = engagements.find(e => e.id === activeId)
 
-  const createEngagement = () => {
+  const handleAuthSuccess = (authSession) => {
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authSession))
+    setSession(authSession)
+  }
+
+  const signOut = async () => {
+    try {
+      if (session) await supabaseRequest("/auth/v1/logout", { method: "POST", session })
+    } catch {}
+    localStorage.removeItem(AUTH_STORAGE_KEY)
+    setSession(null)
+    setEngagements([])
+    setActiveId(null)
+    setView("list")
+    setTimerRunning(false)
+  }
+
+  const createEngagement = async () => {
     if (!newForm.clientName || !newForm.company || !newForm.reviewerName || !newForm.reviewDate || !newForm.scope) { alert("Client name, company, reviewer name, review date, and scope are required."); return }
-    const eng = {
-      id: uid(),
-      ...newForm,
-      reviewDate: newForm.reviewDate || todayISODate(),
-      checks: {},
-      duration: 0,
-      createdAt: new Date().toISOString(),
-      completedAt: null,
+    if (!session) { setDbError("Sign in before creating a review."); return }
+    setDbError("")
+    try {
+      const eng = await createReviewInSupabase(newForm, session)
+      setEngagements(es => [eng, ...es])
+      setActiveId(eng.id)
+      setView("active")
+      setTimerRunning(true)
+      setNewForm({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
+    } catch (e) {
+      setDbError(e.message || "Unable to create review.")
     }
-    setEngagements(es => [eng, ...es])
-    setActiveId(eng.id)
-    setView("active")
-    setTimerRunning(true)
-    setNewForm({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
   }
 
   const setCheckResult = (checkId, result) => {
+    const current = engagements.find(e => e.id === activeId)?.checks?.[checkId] || {}
+    const nextItem = { ...current, result }
     setEngagements(es => es.map(e => e.id === activeId
-      ? { ...e, checks: { ...e.checks, [checkId]: { ...e.checks?.[checkId], result } } }
+      ? { ...e, checks: { ...e.checks, [checkId]: nextItem } }
       : e
     ))
+    if (session && activeId) upsertReviewItem(session, activeId, checkId, nextItem).catch(e => setDbError(e.message || "Unable to save checklist item."))
   }
 
   const setCheckNotes = (checkId, notes) => {
+    const current = engagements.find(e => e.id === activeId)?.checks?.[checkId] || {}
+    const nextItem = { ...current, notes }
     setEngagements(es => es.map(e => e.id === activeId
-      ? { ...e, checks: { ...e.checks, [checkId]: { ...e.checks?.[checkId], notes } } }
+      ? { ...e, checks: { ...e.checks, [checkId]: nextItem } }
       : e
     ))
+    if (session && activeId) upsertReviewItem(session, activeId, checkId, nextItem).catch(e => setDbError(e.message || "Unable to save checklist note."))
   }
 
   const updateEngagementField = (field, val) => {
+    const columnMap = { reviewerName: "reviewer_name", reviewDate: "review_date", scope: "scope", secureScoreNotes: "secure_score_notes", duration: "duration_ms" }
     setEngagements(es => es.map(e => e.id === activeId ? { ...e, [field]: val } : e))
+    const column = columnMap[field]
+    if (session && activeId && column) patchReview(session, activeId, { [column]: val }).catch(e => setDbError(e.message || "Unable to save review field."))
   }
 
-  const deleteEngagement = (id) => {
-    setEngagements(es => es.filter(e => e.id !== id))
-    if (activeId === id) { setActiveId(null); setView("list") }
+  const deleteEngagement = async (id) => {
+    if (!session) return
+    try {
+      await deleteReviewFromSupabase(session, id)
+      setEngagements(es => es.filter(e => e.id !== id))
+      if (activeId === id) { setActiveId(null); setView("list") }
+    } catch (e) {
+      setDbError(e.message || "Unable to delete review.")
+    }
   }
 
   if (!loaded) return (
@@ -381,6 +570,10 @@ export default function Checklist() {
       <p className="text-[13px] font-mono text-[#3d5a7a] animate-pulse">Loading checklists…</p>
     </div>
   )
+
+  if (!SUPABASE_CONFIGURED) return <MissingSupabaseConfig />
+
+  if (!session) return <LoginView onAuth={handleAuthSuccess} />
 
   return (
     <div className="min-h-screen bg-[#080d14] text-[#e8f0fe]"
@@ -417,6 +610,10 @@ export default function Checklist() {
           )}
 
           <div className="flex items-center gap-2">
+            <button onClick={signOut}
+              className="text-[11px] font-mono text-[#7a9abf] border border-[#1a2d45] px-3 py-2 rounded-lg hover:text-[#e8f0fe] hover:border-[#1e3a5f] transition-colors">
+              Sign out
+            </button>
             {view === "active" && (
               <>
                 <button onClick={() => { setShowExport(true); setTimerRunning(false) }}
@@ -446,6 +643,16 @@ export default function Checklist() {
       </div>
 
       <div className="max-w-4xl mx-auto px-5 py-6">
+        {dbError && (
+          <div className="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl p-3 text-[12px] text-red-300">
+            {dbError}
+          </div>
+        )}
+        {dbLoading && (
+          <div className="mb-4 bg-[#0d1520] border border-[#1a2d45] rounded-xl p-3 text-[12px] text-[#7a9abf]">
+            Loading secure review history…
+          </div>
+        )}
 
         {/* ── NEW REVIEW FORM ── */}
         {view === "new" && (
@@ -477,9 +684,96 @@ export default function Checklist() {
       {showExport && active && (
         <ExportModal
           engagement={active}
+          session={session}
           onClose={() => setShowExport(false)}
         />
       )}
+    </div>
+  )
+}
+
+
+function MissingSupabaseConfig() {
+  return (
+    <div className="min-h-screen bg-[#080d14] text-[#e8f0fe] flex items-center justify-center px-5">
+      <div className="max-w-lg bg-[#0d1520] border border-amber-500/30 rounded-xl p-6">
+        <p className="text-[11px] font-mono text-amber-300 uppercase tracking-wider mb-2">Supabase configuration required</p>
+        <h1 className="text-[20px] font-semibold mb-2">Secure review storage is not configured yet.</h1>
+        <p className="text-[13px] text-[#7a9abf] leading-relaxed mb-4">
+          Phase 2A requires Supabase Auth and RLS-backed persistence before reviews can be created or viewed.
+          Add the public Supabase URL and anon key to your environment, then apply the SQL migration in <span className="font-mono text-[#e8f0fe]">supabase/migrations/001_initial_schema.sql</span>.
+        </p>
+        <div className="bg-[#080d14] border border-[#1a2d45] rounded-lg p-3 text-[12px] font-mono text-[#e8f0fe] space-y-1">
+          <p>NEXT_PUBLIC_SUPABASE_URL=...</p>
+          <p>NEXT_PUBLIC_SUPABASE_ANON_KEY=...</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LoginView({ onAuth }) {
+  const [mode, setMode] = useState("signin")
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [fullName, setFullName] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState("")
+  const [message, setMessage] = useState("")
+
+  async function submit(e) {
+    e.preventDefault()
+    setBusy(true)
+    setError("")
+    setMessage("")
+    try {
+      const data = mode === "signup"
+        ? await authRequest("/auth/v1/signup", { email, password, data: { full_name: fullName } })
+        : await authRequest("/auth/v1/token?grant_type=password", { email, password })
+      if (data.access_token) onAuth(data)
+      else setMessage("Check your email to confirm the account, then sign in.")
+    } catch (e) {
+      setError(e.message || "Authentication failed.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-[#080d14] text-[#e8f0fe] flex items-center justify-center px-5">
+      <form onSubmit={submit} className="w-full max-w-sm bg-[#0d1520] border border-[#1a2d45] rounded-xl p-6 space-y-4">
+        <div>
+          <p className="text-[11px] font-mono text-[#60a5fa] uppercase tracking-wider mb-1">Amazin Cyber</p>
+          <h1 className="text-[20px] font-semibold">{mode === "signup" ? "Create operator account" : "Sign in"}</h1>
+          <p className="text-[12px] text-[#7a9abf] mt-1">Authenticated Supabase storage is required for client reviews.</p>
+        </div>
+        {mode === "signup" && (
+          <div>
+            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Name</label>
+            <input value={fullName} onChange={e => setFullName(e.target.value)}
+              className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6]" />
+          </div>
+        )}
+        <div>
+          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Email</label>
+          <input type="email" value={email} onChange={e => setEmail(e.target.value)} required
+            className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6]" />
+        </div>
+        <div>
+          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Password</label>
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={6}
+            className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6]" />
+        </div>
+        {error && <p className="text-[12px] text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg p-2">{error}</p>}
+        {message && <p className="text-[12px] text-green-300 bg-green-500/10 border border-green-500/30 rounded-lg p-2">{message}</p>}
+        <button disabled={busy} className="w-full text-[14px] font-mono text-white bg-[#3b82f6] py-2.5 rounded-lg hover:bg-[#2563eb] disabled:opacity-60 transition-colors">
+          {busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}
+        </button>
+        <button type="button" onClick={() => setMode(mode === "signup" ? "signin" : "signup")}
+          className="w-full text-[12px] text-[#7a9abf] hover:text-[#e8f0fe] transition-colors">
+          {mode === "signup" ? "Already have an account? Sign in" : "Need an account? Create one"}
+        </button>
+      </form>
     </div>
   )
 }
@@ -808,7 +1102,7 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
 }
 
 // ── REPORT MODAL ───────────────────────────────────────────────────────────
-function ExportModal({ engagement, onClose }) {
+function ExportModal({ engagement, session, onClose }) {
   const [stage, setStage] = useState("ready") // ready | generating | done | error
   const [report, setReport] = useState(null)
   const [errorMsg, setErrorMsg] = useState("")
@@ -836,8 +1130,11 @@ function ExportModal({ engagement, onClose }) {
     try {
       const res = await fetch("/api/generate-report", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildStructuredReportPayload(engagement))
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session?.access_token || ""}`,
+        },
+        body: JSON.stringify({ reviewId: engagement.id })
       })
       const data = await res.json()
       if (!res.ok) {
