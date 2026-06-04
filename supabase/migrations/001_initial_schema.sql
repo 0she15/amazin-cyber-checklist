@@ -41,7 +41,6 @@ create table if not exists public.reviews (
 create table if not exists public.review_items (
   id uuid primary key default gen_random_uuid(),
   review_id uuid not null references public.reviews(id) on delete cascade,
-  user_id uuid not null references auth.users(id) on delete cascade default auth.uid(),
   check_id text not null,
   result text check (result in ('pass', 'fail', 'na') or result is null),
   notes text,
@@ -53,7 +52,6 @@ create table if not exists public.review_items (
 create table if not exists public.generated_reports (
   id uuid primary key default gen_random_uuid(),
   review_id uuid not null references public.reviews(id) on delete cascade,
-  user_id uuid not null references auth.users(id) on delete cascade default auth.uid(),
   report jsonb not null,
   score jsonb,
   created_at timestamptz not null default now()
@@ -67,6 +65,28 @@ create table if not exists public.audit_events (
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
+
+-- Compatibility for existing projects where these tables may already exist.
+-- clients/reviews own top-level records directly; child tables inherit ownership through reviews.
+alter table public.clients add column if not exists user_id uuid references auth.users(id) on delete cascade;
+alter table public.clients alter column user_id set default auth.uid();
+alter table public.reviews add column if not exists user_id uuid references auth.users(id) on delete cascade;
+alter table public.reviews alter column user_id set default auth.uid();
+alter table public.audit_events add column if not exists user_id uuid references auth.users(id) on delete set null;
+alter table public.audit_events alter column user_id set default auth.uid();
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'review_items_review_id_check_id_key'
+      and conrelid = 'public.review_items'::regclass
+  ) then
+    alter table public.review_items
+      add constraint review_items_review_id_check_id_key unique (review_id, check_id);
+  end if;
+end;
+$$;
 
 create or replace function public.touch_updated_at()
 returns trigger
@@ -120,6 +140,27 @@ alter table public.review_items enable row level security;
 alter table public.generated_reports enable row level security;
 alter table public.audit_events enable row level security;
 
+drop policy if exists "profiles_select_own" on public.profiles;
+drop policy if exists "profiles_update_own" on public.profiles;
+drop policy if exists "profiles_insert_own" on public.profiles;
+drop policy if exists "clients_select_own" on public.clients;
+drop policy if exists "clients_insert_own" on public.clients;
+drop policy if exists "clients_update_own" on public.clients;
+drop policy if exists "clients_delete_own" on public.clients;
+drop policy if exists "reviews_select_own" on public.reviews;
+drop policy if exists "reviews_insert_own" on public.reviews;
+drop policy if exists "reviews_update_own" on public.reviews;
+drop policy if exists "reviews_delete_own" on public.reviews;
+drop policy if exists "review_items_select_own" on public.review_items;
+drop policy if exists "review_items_insert_own" on public.review_items;
+drop policy if exists "review_items_update_own" on public.review_items;
+drop policy if exists "review_items_delete_own" on public.review_items;
+drop policy if exists "generated_reports_select_own" on public.generated_reports;
+drop policy if exists "generated_reports_insert_own" on public.generated_reports;
+drop policy if exists "generated_reports_delete_own" on public.generated_reports;
+drop policy if exists "audit_events_select_own" on public.audit_events;
+drop policy if exists "audit_events_insert_own" on public.audit_events;
+
 create policy "profiles_select_own" on public.profiles
   for select to authenticated using (id = auth.uid());
 create policy "profiles_update_own" on public.profiles
@@ -152,29 +193,36 @@ create policy "reviews_delete_own" on public.reviews
   for delete to authenticated using (user_id = auth.uid());
 
 create policy "review_items_select_own" on public.review_items
-  for select to authenticated using (user_id = auth.uid());
+  for select to authenticated using (
+    exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+  );
 create policy "review_items_insert_own" on public.review_items
   for insert to authenticated with check (
-    user_id = auth.uid()
-    and exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+    exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
   );
 create policy "review_items_update_own" on public.review_items
-  for update to authenticated using (user_id = auth.uid()) with check (
-    user_id = auth.uid()
-    and exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+  for update to authenticated using (
+    exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+  ) with check (
+    exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
   );
 create policy "review_items_delete_own" on public.review_items
-  for delete to authenticated using (user_id = auth.uid());
+  for delete to authenticated using (
+    exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+  );
 
 create policy "generated_reports_select_own" on public.generated_reports
-  for select to authenticated using (user_id = auth.uid());
+  for select to authenticated using (
+    exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+  );
 create policy "generated_reports_insert_own" on public.generated_reports
   for insert to authenticated with check (
-    user_id = auth.uid()
-    and exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+    exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
   );
 create policy "generated_reports_delete_own" on public.generated_reports
-  for delete to authenticated using (user_id = auth.uid());
+  for delete to authenticated using (
+    exists (select 1 from public.reviews r where r.id = review_id and r.user_id = auth.uid())
+  );
 
 create policy "audit_events_select_own" on public.audit_events
   for select to authenticated using (user_id = auth.uid());
