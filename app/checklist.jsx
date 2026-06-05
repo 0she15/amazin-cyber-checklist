@@ -452,6 +452,17 @@ export default function Checklist() {
 
   useEffect(() => {
     if (!SUPABASE_CONFIGURED) { setLoaded(true); return }
+    // SSO: accept a Supabase session handed over from the OS Hub via the URL hash
+    // (#sso_session=<base64 json>) and persist it like a normal login.
+    try {
+      const m = (window.location.hash || "").match(/sso_session=([^&]+)/)
+      if (m) {
+        const json = decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))
+        JSON.parse(json) // validate
+        localStorage.setItem(AUTH_STORAGE_KEY, json)
+        history.replaceState(null, "", window.location.pathname + window.location.search)
+      }
+    } catch {}
     try {
       const raw = localStorage.getItem(AUTH_STORAGE_KEY)
       if (raw) {
