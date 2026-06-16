@@ -141,7 +141,7 @@ async function loadReviewPayloadFromSupabase(reviewId, token, userId) {
   const completionPct = Math.round((completed / CHECKLIST_TOTAL) * 100)
   if (completionPct < 60) throw new Error("At least 60% of recognized checklist items must be completed before generating a report.")
   if (completed < 20) throw new Error("Complete at least 20 recognized checklist items before generating a client report.")
-  if (!review.reviewer_name) throw new Error("Reviewer name is required before generating a report.")
+  if (!review.reviewer_name) throw new Error("Assessor name is required before generating a report.")
   if (!review.review_date) throw new Error("Assessment date is required before generating a report.")
   if (!review.scope) throw new Error("Assessment scope is required before generating a report.")
 
@@ -154,7 +154,7 @@ async function loadReviewPayloadFromSupabase(reviewId, token, userId) {
     client: {
       company: cleanString(client.name, 120),
       clientName: cleanString(client.contact_name, 120),
-      package: cleanString(review.package, 120) || "Business Snapshot",
+      package: cleanString(review.package, 120) || "Business Security Assessment",
       licenseType: cleanString(review.license_type, 120),
       userCount: cleanString(review.user_count, 40),
       reviewerName: cleanString(review.reviewer_name, 120),
@@ -262,7 +262,7 @@ function validatePayload(body) {
   const reviewDate = cleanString(client.reviewDate, 40)
 
   if (!company) return { error: "Company is required before generating a report." }
-  if (!reviewerName) return { error: "Reviewer name is required before generating a report." }
+  if (!reviewerName) return { error: "Assessor name is required before generating a report." }
   if (!scope) return { error: "Assessment scope is required before generating a report." }
   if (!reviewDate) return { error: "Assessment date is required before generating a report." }
 
@@ -288,7 +288,7 @@ function validatePayload(body) {
       client: {
         company,
         clientName: cleanString(client.clientName, 120),
-        package: cleanString(client.package, 120) || "Business Snapshot",
+        package: cleanString(client.package, 120) || "Business Security Assessment",
         licenseType: cleanString(client.licenseType, 120),
         userCount: cleanString(client.userCount, 40),
         reviewerName,

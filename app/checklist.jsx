@@ -244,7 +244,7 @@ function getChecklistStats(checks) {
 function getReportQualityIssues(engagement) {
   const { completedCount, completionPct } = getChecklistStats(engagement.checks)
   const issues = []
-  if (!engagement.reviewerName?.trim()) issues.push("Reviewer name is required.")
+  if (!engagement.reviewerName?.trim()) issues.push("Assessor name is required.")
   if (!engagement.reviewDate?.trim()) issues.push("Assessment date is required.")
   if (!engagement.scope?.trim()) issues.push("Assessment scope is required.")
   if (completionPct < 60) issues.push("At least 60% of checklist items must be completed.")
@@ -284,7 +284,7 @@ function buildStructuredReportPayload(engagement) {
     client: {
       company: engagement.company || "",
       clientName: engagement.clientName || "",
-      package: engagement.package || "Business Snapshot",
+      package: engagement.package || "Business Security Assessment",
       licenseType: engagement.licenseType || "",
       userCount: engagement.userCount || "",
       reviewerName: engagement.reviewerName || "",
@@ -297,6 +297,26 @@ function buildStructuredReportPayload(engagement) {
   }
 }
 
+// Canonical package labels — must match the proposal generator's PACKAGES
+// options exactly so a one-click prefill (?package=) selects the right option.
+const PROPOSAL_PACKAGES = [
+  "Security Snapshot Assessment — $750",
+  "Business Security Assessment — $1,500",
+  "Security Remediation — Starting at $2,500",
+  "Ongoing Security Monitoring — Starting at $299/month",
+]
+
+// Map any stored package label (new or legacy) to a canonical proposal package
+// so older assessments still prefill the proposal generator correctly.
+function proposalPackageFor(pkg) {
+  const s = (pkg || "").toLowerCase()
+  if (s.includes("monitoring") || s.includes("299")) return PROPOSAL_PACKAGES[3]
+  if (s.includes("remediation") || s.includes("2,500") || s.includes("2500") || s.includes("1,000") || s.includes("1000")) return PROPOSAL_PACKAGES[2]
+  if (s.includes("business") || s.includes("1,500") || s.includes("1500") || s.includes("500")) return PROPOSAL_PACKAGES[1]
+  if (s.includes("snapshot") || s.includes("starter") || s.includes("750") || s.includes("250")) return PROPOSAL_PACKAGES[0]
+  return PROPOSAL_PACKAGES[1]
+}
+
 function buildProposalSummary(engagement, pass, fail, pct) {
   const fails = []
   SECTIONS.forEach(s => s.checks.forEach(c => {
@@ -305,7 +325,7 @@ function buildProposalSummary(engagement, pass, fail, pct) {
   return [
     `Security Snapshot completed ${formatDate(engagement.createdAt)} for ${engagement.company}.`,
     `Score: ${pass} pass / ${fail} fail (${pct}%).`,
-    `Suggested package: Remediation Support — $1,000+.`,
+    `Suggested package: ${PROPOSAL_PACKAGES[2]}.`,
     fails.length ? `Key findings: ${fails.slice(0, 5).join("; ")}.` : "No failed checks were recorded.",
   ].join("\n")
 }
@@ -321,7 +341,7 @@ function reviewFromRow(row) {
     clientId: row.client_id,
     clientName: client?.contact_name || "",
     company: client?.name || "Unknown company",
-    package: row.package || "Business Snapshot — $500",
+    package: row.package || "Business Security Assessment — $1,500",
     licenseType: row.license_type || "",
     userCount: row.user_count || "",
     reviewerName: row.reviewer_name || "",
@@ -447,7 +467,7 @@ export default function Checklist() {
   const [activeId, setActiveId] = useState(null)
   const [showExport, setShowExport] = useState(false)
   const [timerRunning, setTimerRunning] = useState(false)
-  const [newForm, setNewForm] = useState({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
+  const [newForm, setNewForm] = useState({ clientName: "", company: "", package: "Business Security Assessment — $1,500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
   const timerRef = useRef(null)
 
   useEffect(() => {
@@ -528,7 +548,7 @@ export default function Checklist() {
   }
 
   const createEngagement = async () => {
-    if (!newForm.clientName || !newForm.company || !newForm.reviewerName || !newForm.reviewDate || !newForm.scope) { alert("Client name, company, reviewer name, assessment date, and scope are required."); return }
+    if (!newForm.clientName || !newForm.company || !newForm.reviewerName || !newForm.reviewDate || !newForm.scope) { alert("Client name, company, assessor name, assessment date, and scope are required."); return }
     if (!session) { setDbError("Sign in before creating an assessment."); return }
     setDbError("")
     try {
@@ -537,7 +557,7 @@ export default function Checklist() {
       setActiveId(eng.id)
       setView("active")
       setTimerRunning(true)
-      setNewForm({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
+      setNewForm({ clientName: "", company: "", package: "Business Security Assessment — $1,500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
     } catch (e) {
       setDbError(e.message || "Unable to create assessment.")
     }
@@ -797,7 +817,7 @@ function LoginView({ onAuth }) {
 // ── NEW REVIEW FORM ────────────────────────────────────────────────────────
 function NewReviewForm({ form, setForm, onCreate }) {
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
-  const PACKAGES = ["Starter Snapshot — $250", "Business Snapshot — $500", "Remediation Support — $1,000+"]
+  const PACKAGES = PROPOSAL_PACKAGES
   const LICENSES = ["Microsoft 365 Business Basic", "Microsoft 365 Business Standard", "Microsoft 365 Business Premium", "Mixed / Not sure"]
   return (
     <div className="max-w-lg mx-auto">
@@ -846,7 +866,7 @@ function NewReviewForm({ form, setForm, onCreate }) {
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Reviewer Name *</label>
+            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Assessor Name *</label>
             <input value={form.reviewerName} onChange={e => set("reviewerName", e.target.value)}
               placeholder="Oshé"
               className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
@@ -977,7 +997,7 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
         <div className="flex items-start justify-between gap-3 mb-3">
           <div>
             <p className={`text-[12px] font-semibold ${qualityIssues.length ? "text-amber-300" : "text-green-300"}`}>Report Quality Gate</p>
-            <p className="text-[11px] text-[#7a9abf]">Client reports require scope, reviewer, date, and minimum completion before generation.</p>
+            <p className="text-[11px] text-[#7a9abf]">Client reports require scope, assessor, date, and minimum completion before generation.</p>
           </div>
           <span className={`text-[10px] font-mono px-2 py-1 rounded border ${qualityIssues.length ? "text-amber-300 border-amber-500/30" : "text-green-300 border-green-500/30"}`}>
             {qualityIssues.length ? `${qualityIssues.length} blocker${qualityIssues.length === 1 ? "" : "s"}` : "Ready"}
@@ -985,9 +1005,9 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
           <div>
-            <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Reviewer Name *</label>
+            <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Assessor Name *</label>
             <input value={engagement.reviewerName || ""} onChange={e => onUpdateField("reviewerName", e.target.value)}
-              placeholder="Reviewer name"
+              placeholder="Assessor name"
               className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
           </div>
           <div>
@@ -1311,13 +1331,17 @@ function ExportModal({ engagement, session, onClose }) {
                 </button>
                 <button onClick={async () => {
                   const summary = buildProposalSummary(engagement, pass, fail, pct)
+                  // Prefill only the non-sensitive package selection via the URL.
+                  // Client name, company, and findings are never passed in the URL.
+                  const proposalPackage = proposalPackageFor(engagement.package)
+                  const url = `https://proposals.amazincyber.com/?package=${encodeURIComponent(proposalPackage)}`
                   try {
                     await navigator.clipboard?.writeText(summary)
-                    setProposalStatus("Opened the proposal tool with a clean URL. A remediation summary was copied for manual paste.")
+                    setProposalStatus(`Opened the proposal tool with the ${proposalPackage} package pre-selected. A remediation summary was copied for manual paste.`)
                   } catch {
-                    setProposalStatus("Opened the proposal tool with a clean URL. Copy findings manually from this report.")
+                    setProposalStatus(`Opened the proposal tool with the ${proposalPackage} package pre-selected. Copy findings manually from this report.`)
                   }
-                  window.open("https://proposals.amazincyber.com", "_blank", "noopener,noreferrer")
+                  window.open(url, "_blank", "noopener,noreferrer")
                 }}
                   className="flex-1 text-[12px] font-mono text-white bg-purple-600 py-2 rounded-lg hover:bg-purple-700 transition-colors">
                   Open Proposal Tool →
@@ -1448,7 +1472,7 @@ function ExportModal({ engagement, session, onClose }) {
 
                 {/* Footer */}
                 <div style={{ marginTop: 24, paddingTop: 14, borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", fontSize: 11, color: "#9ca3af", flexWrap: "wrap", gap: 4 }}>
-                  <span>Prepared by {engagement.reviewerName || "Amazin Cyber"} · Amazin Cyber Solutions · amazincyber.com</span>
+                  <span>Prepared by {engagement.reviewerName ? `${engagement.reviewerName} — Assessor` : "Amazin Cyber"} · Amazin Cyber Solutions · amazincyber.com</span>
                   <span>Confidential — for {engagement.company} only</span>
                 </div>
               </div>
