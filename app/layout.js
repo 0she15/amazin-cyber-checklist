@@ -1,7 +1,7 @@
 import "./globals.css"
 export const metadata = {
   title: "Amazin Cyber — M365 Security Checklist",
-  description: "Microsoft 365 security review checklist",
+  description: "Microsoft 365 security assessment checklist",
   icons: {
     icon: [
       { url: "/favicon.ico" },

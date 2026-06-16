@@ -245,8 +245,8 @@ function getReportQualityIssues(engagement) {
   const { completedCount, completionPct } = getChecklistStats(engagement.checks)
   const issues = []
   if (!engagement.reviewerName?.trim()) issues.push("Reviewer name is required.")
-  if (!engagement.reviewDate?.trim()) issues.push("Review date is required.")
-  if (!engagement.scope?.trim()) issues.push("Review scope is required.")
+  if (!engagement.reviewDate?.trim()) issues.push("Assessment date is required.")
+  if (!engagement.scope?.trim()) issues.push("Assessment scope is required.")
   if (completionPct < 60) issues.push("At least 60% of checklist items must be completed.")
   if (completedCount < 20) issues.push("Complete at least 20 checklist items before generating a client report.")
   return issues
@@ -369,7 +369,7 @@ async function createReviewInSupabase(form, session) {
     },
   })
   const review = reviews?.[0]
-  if (!review?.id) throw new Error("Unable to create review record.")
+  if (!review?.id) throw new Error("Unable to create assessment record.")
   return reviewFromRow({ ...review, clients: client, review_items: [] })
 }
 
@@ -414,7 +414,7 @@ function buildExport(engagement) {
   lines.push(`Client: ${engagement.clientName || "Unknown"}`)
   lines.push(`Company: ${engagement.company || "Unknown"}`)
   lines.push(`Package: ${engagement.package || "Unknown"}`)
-  lines.push(`Reviewed: ${formatDate(engagement.createdAt)}`)
+  lines.push(`Assessed: ${formatDate(engagement.createdAt)}`)
   lines.push(`Duration: ${engagement.duration ? formatDuration(engagement.duration) : "Not recorded"}`)
   lines.push(``)
 
@@ -483,7 +483,7 @@ export default function Checklist() {
     setDbError("")
     loadReviewsFromSupabase(session)
       .then(rows => { if (!cancelled) setEngagements(rows) })
-      .catch(e => { if (!cancelled) setDbError(e.message || "Unable to load reviews.") })
+      .catch(e => { if (!cancelled) setDbError(e.message || "Unable to load assessments.") })
       .finally(() => { if (!cancelled) setDbLoading(false) })
     return () => { cancelled = true }
   }, [loaded, session])
@@ -528,8 +528,8 @@ export default function Checklist() {
   }
 
   const createEngagement = async () => {
-    if (!newForm.clientName || !newForm.company || !newForm.reviewerName || !newForm.reviewDate || !newForm.scope) { alert("Client name, company, reviewer name, review date, and scope are required."); return }
-    if (!session) { setDbError("Sign in before creating a review."); return }
+    if (!newForm.clientName || !newForm.company || !newForm.reviewerName || !newForm.reviewDate || !newForm.scope) { alert("Client name, company, reviewer name, assessment date, and scope are required."); return }
+    if (!session) { setDbError("Sign in before creating an assessment."); return }
     setDbError("")
     try {
       const eng = await createReviewInSupabase(newForm, session)
@@ -539,7 +539,7 @@ export default function Checklist() {
       setTimerRunning(true)
       setNewForm({ clientName: "", company: "", package: "Business Snapshot — $500", licenseType: "", userCount: "", reviewerName: "", reviewDate: todayISODate(), scope: "", notes: "" })
     } catch (e) {
-      setDbError(e.message || "Unable to create review.")
+      setDbError(e.message || "Unable to create assessment.")
     }
   }
 
@@ -567,7 +567,7 @@ export default function Checklist() {
     const columnMap = { reviewerName: "reviewer_name", reviewDate: "review_date", scope: "scope", secureScoreNotes: "secure_score_notes", duration: "duration_ms" }
     setEngagements(es => es.map(e => e.id === activeId ? { ...e, [field]: val } : e))
     const column = columnMap[field]
-    if (session && activeId && column) patchReview(session, activeId, { [column]: val }).catch(e => setDbError(e.message || "Unable to save review field."))
+    if (session && activeId && column) patchReview(session, activeId, { [column]: val }).catch(e => setDbError(e.message || "Unable to save assessment field."))
   }
 
   const deleteEngagement = async (id) => {
@@ -577,7 +577,7 @@ export default function Checklist() {
       setEngagements(es => es.filter(e => e.id !== id))
       if (activeId === id) { setActiveId(null); setView("list") }
     } catch (e) {
-      setDbError(e.message || "Unable to delete review.")
+      setDbError(e.message || "Unable to delete assessment.")
     }
   }
 
@@ -638,14 +638,14 @@ export default function Checklist() {
                 </button>
                 <button onClick={() => { setView("list"); setTimerRunning(false) }}
                   className="text-[13px] font-mono text-[#7a9abf] border border-[#1a2d45] px-4 py-2 rounded-lg hover:text-[#e8f0fe] hover:border-[#1e3a5f] transition-colors">
-                  ← All Reviews
+                  ← All Assessments
                 </button>
               </>
             )}
             {view === "list" && (
               <button onClick={() => setView("new")}
                 className="text-[13px] font-mono text-white bg-[#3b82f6] px-4 py-2 rounded-lg hover:bg-[#2563eb] transition-colors">
-                + New Review
+                + New Assessment
               </button>
             )}
             {view === "new" && (
@@ -666,7 +666,7 @@ export default function Checklist() {
         )}
         {dbLoading && (
           <div className="mb-4 bg-[#0d1520] border border-[#1a2d45] rounded-xl p-3 text-[12px] text-[#7a9abf]">
-            Loading secure review history…
+            Loading secure assessment history…
           </div>
         )}
 
@@ -714,9 +714,9 @@ function MissingSupabaseConfig() {
     <div className="min-h-screen bg-[#080d14] text-[#e8f0fe] flex items-center justify-center px-5">
       <div className="max-w-lg bg-[#0d1520] border border-amber-500/30 rounded-xl p-6">
         <p className="text-[11px] font-mono text-amber-300 uppercase tracking-wider mb-2">Supabase configuration required</p>
-        <h1 className="text-[20px] font-semibold mb-2">Secure review storage is not configured yet.</h1>
+        <h1 className="text-[20px] font-semibold mb-2">Secure assessment storage is not configured yet.</h1>
         <p className="text-[13px] text-[#7a9abf] leading-relaxed mb-4">
-          Phase 2A requires Supabase Auth and RLS-backed persistence before reviews can be created or viewed.
+          Phase 2A requires Supabase Auth and RLS-backed persistence before assessments can be created or viewed.
           Add the public Supabase URL and anon key to your environment, then apply the SQL migration in <span className="font-mono text-[#e8f0fe]">supabase/migrations/001_initial_schema.sql</span>.
         </p>
         <div className="bg-[#080d14] border border-[#1a2d45] rounded-lg p-3 text-[12px] font-mono text-[#e8f0fe] space-y-1">
@@ -761,7 +761,7 @@ function LoginView({ onAuth }) {
         <div>
           <p className="text-[11px] font-mono text-[#60a5fa] uppercase tracking-wider mb-1">Amazin Cyber</p>
           <h1 className="text-[20px] font-semibold">{mode === "signup" ? "Create operator account" : "Sign in"}</h1>
-          <p className="text-[12px] text-[#7a9abf] mt-1">Authenticated Supabase storage is required for client reviews.</p>
+          <p className="text-[12px] text-[#7a9abf] mt-1">Authenticated Supabase storage is required for client assessments.</p>
         </div>
         {mode === "signup" && (
           <div>
@@ -802,7 +802,7 @@ function NewReviewForm({ form, setForm, onCreate }) {
   return (
     <div className="max-w-lg mx-auto">
       <div className="mb-6">
-        <p className="text-[11px] font-mono text-[#60a5fa] uppercase tracking-wider mb-1">New Security Review</p>
+        <p className="text-[11px] font-mono text-[#60a5fa] uppercase tracking-wider mb-1">New Security Assessment</p>
         <p className="text-[22px] font-semibold text-[#e8f0fe]">Start a Checklist</p>
         <p className="text-[13px] text-[#7a9abf] mt-1">Timer starts automatically when you begin.</p>
       </div>
@@ -852,26 +852,26 @@ function NewReviewForm({ form, setForm, onCreate }) {
               className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
           </div>
           <div>
-            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Date *</label>
+            <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Assessment Date *</label>
             <input type="date" value={form.reviewDate} onChange={e => set("reviewDate", e.target.value)}
               className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
           </div>
         </div>
         <div>
-          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Scope *</label>
+          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Assessment Scope *</label>
           <textarea value={form.scope} onChange={e => set("scope", e.target.value)} rows={3}
-            placeholder="Example: Microsoft 365 tenant security settings reviewed through Entra ID, Exchange admin center, Defender, SharePoint, and Secure Score."
+            placeholder="Example: Microsoft 365 tenant security settings assessed through Entra ID, Exchange admin center, Defender, SharePoint, and Secure Score."
             className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors resize-none" />
         </div>
         <div>
-          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Pre-Review Notes</label>
+          <label className="block text-[11px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Pre-Assessment Notes</label>
           <textarea value={form.notes} onChange={e => set("notes", e.target.value)} rows={3}
             placeholder="Known concerns, context from discovery call, specific areas to focus on..."
             className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[13px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors resize-none" />
         </div>
         <button onClick={onCreate}
           className="w-full text-[14px] font-mono text-white bg-[#3b82f6] py-2.5 rounded-lg hover:bg-[#2563eb] transition-colors">
-          Start Review →
+          Start Assessment →
         </button>
       </div>
     </div>
@@ -889,14 +889,14 @@ function ListView({ engagements, onOpen, onDelete, onNew }) {
           <path d="M9 12h6M9 16h4" stroke="#60a5fa" strokeWidth="1.5" strokeLinecap="round"/>
         </svg>
       </div>
-      <p className="text-[15px] font-semibold text-[#e8f0fe] mb-1">No reviews yet</p>
-      <p className="text-[13px] text-[#7a9abf] mb-5">Start a new review to run your first M365 security checklist.</p>
-      <button onClick={onNew} className="text-[13px] font-mono text-white bg-[#3b82f6] px-5 py-2 rounded-lg hover:bg-[#2563eb] transition-colors">+ New Review</button>
+      <p className="text-[15px] font-semibold text-[#e8f0fe] mb-1">No assessments yet</p>
+      <p className="text-[13px] text-[#7a9abf] mb-5">Start a new assessment to run your first M365 security checklist.</p>
+      <button onClick={onNew} className="text-[13px] font-mono text-white bg-[#3b82f6] px-5 py-2 rounded-lg hover:bg-[#2563eb] transition-colors">+ New Assessment</button>
     </div>
   )
   return (
     <div className="space-y-3">
-      <p className="text-[11px] font-mono text-[#3d5a7a] uppercase tracking-wider mb-4">{engagements.length} review{engagements.length !== 1 ? "s" : ""}</p>
+      <p className="text-[11px] font-mono text-[#3d5a7a] uppercase tracking-wider mb-4">{engagements.length} assessment{engagements.length !== 1 ? "s" : ""}</p>
       {engagements.map(eng => {
         const pct = calcProgress(eng.checks)
         const { pass, fail } = calcScore(eng.checks)
@@ -915,7 +915,7 @@ function ListView({ engagements, onOpen, onDelete, onNew }) {
                   <p className={`text-[13px] font-mono font-semibold ${isDone ? "text-green-400" : "text-[#60a5fa]"}`}>{pct}%</p>
                   {(pass > 0 || fail > 0) && <p className="text-[10px] font-mono text-[#3d5a7a]">{pass}✓ {fail}✗</p>}
                 </div>
-                <button onClick={e => { e.stopPropagation(); if (window.confirm("Delete this review?")) onDelete(eng.id) }}
+                <button onClick={e => { e.stopPropagation(); if (window.confirm("Delete this assessment?")) onDelete(eng.id) }}
                   className="text-[#3d5a7a] hover:text-red-400 transition-colors text-[11px] font-mono px-1.5 py-0.5 rounded border border-transparent hover:border-red-500/20">
                   ✕
                 </button>
@@ -991,15 +991,15 @@ function ActiveChecklist({ engagement, onSetResult, onSetNotes, onUpdateField })
               className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors" />
           </div>
           <div>
-            <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Date *</label>
+            <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Assessment Date *</label>
             <input type="date" value={engagement.reviewDate || ""} onChange={e => onUpdateField("reviewDate", e.target.value)}
               className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] focus:outline-none focus:border-[#3b82f6] transition-colors" />
           </div>
         </div>
         <div>
-          <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Review Scope *</label>
+          <label className="block text-[10px] font-mono text-[#7a9abf] mb-1 uppercase tracking-wider">Assessment Scope *</label>
           <textarea value={engagement.scope || ""} onChange={e => onUpdateField("scope", e.target.value)} rows={3}
-            placeholder="Describe the tenant, tools, and M365 areas reviewed."
+            placeholder="Describe the tenant, tools, and M365 areas assessed."
             className="w-full bg-[#111d2e] border border-[#1a2d45] rounded-lg px-3 py-2 text-[12px] text-[#e8f0fe] placeholder-[#3d5a7a] focus:outline-none focus:border-[#3b82f6] transition-colors resize-none" />
         </div>
         {qualityIssues.length > 0 && (
@@ -1226,7 +1226,7 @@ function ExportModal({ engagement, session, onClose }) {
         {/* Modal header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#1a2d45]">
           <div>
-            <p className="text-[11px] font-mono text-[#60a5fa] uppercase tracking-wider mb-0.5">Review Complete</p>
+            <p className="text-[11px] font-mono text-[#60a5fa] uppercase tracking-wider mb-0.5">Assessment Complete</p>
             <p className="text-[15px] font-semibold text-[#e8f0fe]">
               {stage === "done" ? "Security Snapshot Report" : "Generate Report"}
             </p>
@@ -1343,7 +1343,7 @@ function ExportModal({ engagement, session, onClose }) {
                   <div style={{ fontSize: 12, color: "#6b7280", display: "flex", gap: 20, flexWrap: "wrap", marginTop: 6 }}>
                     <span>Prepared for: <strong style={{ color: "#374151" }}>{engagement.clientName ? `${engagement.clientName}, ` : ""}{engagement.company}</strong></span>
                     <span>Package: <strong style={{ color: "#374151" }}>{engagement.package}</strong></span>
-                    <span>Reviewed: <strong style={{ color: "#374151" }}>{formatDate(engagement.reviewDate || engagement.createdAt)}</strong></span>
+                    <span>Assessed: <strong style={{ color: "#374151" }}>{formatDate(engagement.reviewDate || engagement.createdAt)}</strong></span>
                     {engagement.duration > 0 && <span>Duration: <strong style={{ color: "#374151" }}>{formatDuration(engagement.duration)}</strong></span>}
                   </div>
                 </div>

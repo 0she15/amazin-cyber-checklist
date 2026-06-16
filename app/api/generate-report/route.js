@@ -142,8 +142,8 @@ async function loadReviewPayloadFromSupabase(reviewId, token, userId) {
   if (completionPct < 60) throw new Error("At least 60% of recognized checklist items must be completed before generating a report.")
   if (completed < 20) throw new Error("Complete at least 20 recognized checklist items before generating a client report.")
   if (!review.reviewer_name) throw new Error("Reviewer name is required before generating a report.")
-  if (!review.review_date) throw new Error("Review date is required before generating a report.")
-  if (!review.scope) throw new Error("Review scope is required before generating a report.")
+  if (!review.review_date) throw new Error("Assessment date is required before generating a report.")
+  if (!review.scope) throw new Error("Assessment scope is required before generating a report.")
 
   const pass = passing.length
   const fail = failed.length
@@ -263,8 +263,8 @@ function validatePayload(body) {
 
   if (!company) return { error: "Company is required before generating a report." }
   if (!reviewerName) return { error: "Reviewer name is required before generating a report." }
-  if (!scope) return { error: "Review scope is required before generating a report." }
-  if (!reviewDate) return { error: "Review date is required before generating a report." }
+  if (!scope) return { error: "Assessment scope is required before generating a report." }
+  if (!reviewDate) return { error: "Assessment date is required before generating a report." }
 
   const seenIds = new Set()
   const failed = cleanCheckArray(checks.failed, seenIds)
@@ -371,7 +371,7 @@ Respond with ONLY this JSON shape:
     "future": ["Longer-term improvement — may require additional licensing or planning."]
   },
   "passItems": ["Short plain-English phrase describing what is working — rewrite, do not copy verbatim"],
-  "scopeAndLimitations": "1-2 sentences that state this is a point-in-time snapshot, name the reviewed scope, and note that N/A items were excluded from scoring."
+  "scopeAndLimitations": "1-2 sentences that state this is a point-in-time snapshot, name the assessed scope, and note that N/A items were excluded from scoring."
 }
 
 Rules:
@@ -381,7 +381,9 @@ Rules:
 - priorityActions.future = Medium findings or improvements requiring licensing/infrastructure changes (max 3 items)
 - passItems = only PASSING checks (max 12 items)
 - Tone: calm, honest, reassuring. Never alarming or dismissive.
-- Every action must be specific enough to act on — never write "improve security" or "review settings".`
+- Every action must be specific enough to act on — never write "improve security" or "review settings".
+- Lead the executive summary with business outcomes, not technical findings. Describe what risks were identified in terms the business owner understands: phishing exposure, account compromise risk, ransomware resilience, identity security gaps, and cyber insurance readiness. Avoid leading with technical terminology. Use plain language throughout.
+- If the environment shows gaps that would typically require Microsoft 365 Business Premium to remediate, include a brief note that a licensing review may be recommended.`
 
   return {
     model: ANTHROPIC_MODEL,
